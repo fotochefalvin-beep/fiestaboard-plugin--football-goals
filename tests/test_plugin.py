@@ -19,7 +19,7 @@ EVENTS = f"/fixtures/{MECHELEN_GENK}/events"
 
 
 def plugin_triggers(service):
-    return [t for t in service.list_active_triggers() if t.plugin_id == "soccer_goals"]
+    return [t for t in service.list_active_triggers() if t.plugin_id == "football_goals"]
 
 
 def events_calls(session, path=EVENTS):
@@ -38,10 +38,12 @@ def test_goal_with_known_scorer_fires_three_lines(live_plugin, session, trigger_
 
     [trigger] = plugin_triggers(trigger_service)
     assert trigger.message == "GOAL!\nMECHELEN 1-0 GENK\nS. MICHEZ 22'"
-    assert trigger.trigger_id == f"soccer_goals_{MECHELEN_GENK}_1_0"
+    assert trigger.trigger_id == f"football_goals_{MECHELEN_GENK}_1_0"
     assert trigger.priority == TriggerPriority.NOTABLE
     assert trigger.duration_seconds == 60
-    assert trigger.data == {"match": "MECHELEN 1-0 GENK", "score": "1-0", "scorer": "S. MICHEZ", "minute": "22'"}
+    expected = {"home_team": "MECHELEN", "away_team": "GENK", "score": "1-0", "scorer": "S. MICHEZ", "minute": "22'"}
+    assert trigger.data == expected
+    assert plugin.fetch_data().data == expected
     assert len(events_calls(session)) == 1
     assert all(call["headers"]["X-Api-Key"] == TEST_KEY for call in session.calls)
 
@@ -137,28 +139,27 @@ def test_newer_goal_stops_old_retries(live_plugin, session, clock, trigger_servi
     assert trigger.message == "GOAL!\nMECHELEN 2-0 GENK\nB. OTHER 40'"
 
 
-# ── matrix: goal against, goals_shown=selected ──────────────────────────────
+# ── matrix: goal against ─────────────────────────────────────────────────────
 
 
-def test_goal_against_selected_team_is_silent(live_plugin, session, trigger_service):
-    plugin = live_plugin({"goals_shown": "selected"})
-    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
-    plugin.handle_score_update(score(MECHELEN_GENK, 0, 1))  # Genk scores
-    assert plugin_triggers(trigger_service) == []
-    assert events_calls(session) == []
-    assert plugin._baselines[MECHELEN_GENK] == (0, 1)
-
+def test_goal_against_is_announced(live_plugin, session, trigger_service):
+    """Every goal in the team's match fires, including goals against them."""
     session.routes[EVENTS] = FakeResponse(
-        200, events_body(MECHELEN_GENK, [goal_event("X. Genk", "10'", "away"), goal_event("S. Michez", "22'")])
+        200, events_body(MECHELEN_GENK, [goal_event("S. Michez", "22'"), goal_event("T. Hrosovsky", "67'", "away")])
     )
-    plugin.handle_score_update(score(MECHELEN_GENK, 1, 1))  # Mechelen scores
-    [trigger] = plugin_triggers(trigger_service)
-    assert trigger.message == "GOAL!\nMECHELEN 1-1 GENK\nS. MICHEZ 22'"
-
-
-def test_goal_against_is_shown_with_goals_shown_all(live_plugin, session, trigger_service):
-    session.routes[EVENTS] = FakeResponse(200, events_body(MECHELEN_GENK, [goal_event("T. Hrosovsky", "12'", "away")]))
     plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))  # baseline
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 1))  # Genk scores
+    [trigger] = plugin_triggers(trigger_service)
+    assert trigger.message == "GOAL!\nMECHELEN 1-1 GENK\nT. HROSOVSKY 67'"
+    data = plugin.fetch_data().data
+    assert (data["score"], data["scorer"], data["minute"]) == ("1-1", "T. HROSOVSKY", "67'")
+
+
+def test_old_goals_shown_setting_is_ignored(live_plugin, session, trigger_service):
+    session.routes[EVENTS] = FakeResponse(200, events_body(MECHELEN_GENK, [goal_event("T. Hrosovsky", "12'", "away")]))
+    plugin = live_plugin({"goals_shown": "selected"})
+    assert plugin.validate_config(dict(plugin.config)) == []
     plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
     plugin.handle_score_update(score(MECHELEN_GENK, 0, 1))
     [trigger] = plugin_triggers(trigger_service)
@@ -206,7 +207,7 @@ def test_scheduled_fixture_gets_zero_zero_baseline(live_plugin, session, now_hol
     session.routes[f"/fixtures/{BARCA_ALAVES}/events"] = FakeResponse(
         200, events_body(BARCA_ALAVES, [goal_event("R. Lewandowski", "3'")])
     )
-    plugin = live_plugin()
+    plugin = live_plugin({"team": "barcelona"})
     assert plugin._baselines[BARCA_ALAVES] == (0, 0)
     now_holder["now"] += timedelta(hours=5)  # 21:30, match running
     plugin.handle_score_update(score(BARCA_ALAVES, 1, 0, minute="3'"))
@@ -224,6 +225,7 @@ def test_score_decrease_updates_baseline_silently(live_plugin, session, trigger_
     assert plugin_triggers(trigger_service) == []
     assert events_calls(session) == []
     assert plugin._baselines[MECHELEN_GENK] == (1, 1)
+    assert plugin.fetch_data().data["score"] == "1-1"  # live score follows the decrease
 
     session.routes[EVENTS] = FakeResponse(
         200,
@@ -399,27 +401,31 @@ def test_new_goal_replaces_previous_goal_trigger(live_plugin, session, trigger_s
     )
     plugin.handle_score_update(score(MECHELEN_GENK, 2, 0))
     [trigger] = plugin_triggers(trigger_service)
-    assert trigger.trigger_id == f"soccer_goals_{MECHELEN_GENK}_2_0"
+    assert trigger.trigger_id == f"football_goals_{MECHELEN_GENK}_2_0"
 
 
 # ── fetch_data ───────────────────────────────────────────────────────────────
 
 
-def test_fetch_data_shows_next_match_then_last_goal(live_plugin, clock):
-    plugin = live_plugin()
+def test_fetch_data_shows_next_match_then_last_goal(live_plugin, session, clock, now_holder):
+    session.routes[f"/fixtures/{BARCA_ALAVES}/events"] = FakeResponse(
+        200, events_body(BARCA_ALAVES, [goal_event("R. Lewandowski", "3'")])
+    )
+    plugin = live_plugin({"team": "barcelona"})
     result = plugin.fetch_data()
     assert result.available
     assert result.formatted_lines[:3] == ["NEXT MATCH", "BARCELONA - ALAVES", "SAT 31 OCT 21:00"]
-    assert result.data == {"match": "BARCELONA - ALAVES", "score": "", "scorer": "", "minute": ""}
+    assert result.data == {"home_team": "BARCELONA", "away_team": "ALAVES", "score": "", "scorer": "", "minute": ""}
     assert len(result.formatted_lines) == 6
 
-    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
-    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    now_holder["now"] += timedelta(hours=5)  # 21:30
+    plugin.handle_score_update(score(BARCA_ALAVES, 1, 0))
     result = plugin.fetch_data()
-    assert result.formatted_lines[:3] == ["GOAL!", "MECHELEN 1-0 GENK", "S. MICHEZ 22'"]
-    assert result.data["scorer"] == "S. MICHEZ"
+    assert result.formatted_lines[:3] == ["GOAL!", "BARCELONA 1-0 ALAVES", "R. LEWANDOWSKI 3'"]
+    assert result.data["scorer"] == "R. LEWANDOWSKI"
 
     clock.advance(3 * 3600)  # goal is old: back to the next match
+    now_holder["now"] += timedelta(hours=3)
     assert plugin.fetch_data().formatted_lines[0] == "NEXT MATCH"
 
 
@@ -427,33 +433,37 @@ def test_fetch_data_without_matches(make_plugin, session):
     from .conftest import team_body
 
     session.routes["/teams/slug/mechelen"] = FakeResponse(200, team_body("mechelen", 149, []))
-    session.routes["/teams/slug/barcelona"] = FakeResponse(200, team_body("barcelona", 120, []))
+    session.routes["/fixtures/date/2026-10-31"] = FakeResponse(200, {"success": True, "data": []})
     plugin = make_plugin()
     plugin.refresh_fixtures()
     result = plugin.fetch_data()
     assert result.available
     assert result.formatted_lines[0] == "NO MATCH SCHEDULED"
+    assert result.data == {"home_team": "", "away_team": "", "score": "", "scorer": "", "minute": ""}
 
 
 def test_fetch_data_before_first_lookup_says_loading(make_plugin):
-    assert make_plugin().fetch_data().formatted_lines[:2] == ["SOCCER GOALS", "LOADING MATCHES"]
+    assert make_plugin().fetch_data().formatted_lines[:2] == ["FOOTBALL GOALS", "LOADING MATCHES"]
 
 
 def test_websockets_handshake_logger_never_logs_debug():
     import logging as std_logging
 
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     assert sportapi._ws_logger.getEffectiveLevel() >= std_logging.INFO
 
 
 def test_fetch_data_reports_missing_settings(make_plugin):
     assert not make_plugin({"api_key": ""}).fetch_data().available
-    assert not make_plugin({"teams": " , "}).fetch_data().available
+    result = make_plugin({"team": " , "}).fetch_data()
+    assert not result.available and "one team" in result.error
+    result = make_plugin({"team": ""}).fetch_data()
+    assert not result.available and result.error == "No team configured"
 
 
 def test_missing_websockets_is_shown_not_raised(make_plugin, monkeypatch, caplog):
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     monkeypatch.setattr(sportapi, "WEBSOCKETS_AVAILABLE", False)
     plugin = make_plugin(start_listener=True)
@@ -470,24 +480,47 @@ def test_missing_websockets_is_shown_not_raised(make_plugin, monkeypatch, caplog
 def test_validate_config(make_plugin):
     plugin = make_plugin()
     assert plugin.validate_config(dict(plugin.config)) == []
-    errors = plugin.validate_config({"api_key": " ", "teams": "", "goals_shown": "mine", "trigger_duration_seconds": 3})
-    assert len(errors) == 4
+    errors = plugin.validate_config({"api_key": " ", "team": "", "trigger_duration_seconds": 3})
+    assert len(errors) == 3
     assert plugin.validate_config(dict(plugin.config, trigger_duration_seconds="x")) == [
         "trigger_duration_seconds must be a whole number"
     ]
 
 
+def test_several_teams_are_a_config_error(make_plugin, session):
+    """Matrix: several teams typed -> 'Enter one team', plugin unavailable."""
+    plugin = make_plugin({"team": "mechelen, barcelona"})
+    errors = plugin.validate_config(dict(plugin.config))
+    assert errors == ["Enter one team, e.g. 'mechelen' (no commas)"]
+    assert not plugin.fetch_data().available
+    plugin.refresh_fixtures()
+    assert session.calls == []
+    assert plugin.wanted_fixture_ids() == []
+
+
+def test_legacy_teams_setting_uses_first_slug_logged_once(make_plugin, session, caplog):
+    """Matrix: old config with only 'teams' follows its first team."""
+    caplog.set_level(logging.WARNING)
+    plugin = make_plugin({"team": None, "teams": "mechelen, barcelona", "goals_shown": "all"})
+    assert plugin.validate_config(dict(plugin.config)) == []
+    plugin.refresh_fixtures()
+    plugin.refresh_fixtures()
+    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
+    assert "/teams/slug/barcelona" not in session.paths()
+    assert caplog.text.count("Old 'teams' setting") == 1
+
+
 def test_unknown_team_is_reported_not_raised(make_plugin, session, caplog):
-    plugin = make_plugin({"teams": "mechelen, kv nowhere"})
+    plugin = make_plugin({"team": "kv nowhere"})
     plugin.refresh_fixtures()
     assert "kv-nowhere" in caplog.text
     errors = plugin.validate_config(dict(plugin.config))
     assert errors == ["sportapi.ai does not know the team 'kv-nowhere' (use the team slug, e.g. 'barcelona')"]
-    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
+    assert plugin.wanted_fixture_ids() == []
 
 
 def test_team_names_become_slugs():
-    from plugins.soccer_goals import split_teams
+    from plugins.football_goals import split_teams
 
     assert split_teams("Mechelen, FC Barcelona ,  Racing Genk, mechelen, Standard Liège") == [
         "mechelen",
@@ -498,9 +531,8 @@ def test_team_names_become_slugs():
     assert split_teams(None) == []
 
 
-def test_goals_shown_and_duration_fallbacks(make_plugin):
-    plugin = make_plugin({"goals_shown": "weird", "trigger_duration_seconds": "abc"})
-    assert plugin._goals_shown() == "all"
+def test_duration_fallbacks(make_plugin):
+    plugin = make_plugin({"trigger_duration_seconds": "abc"})
     assert plugin._trigger_duration() == 60
     assert make_plugin({"trigger_duration_seconds": 2})._trigger_duration() == 10
 
@@ -529,16 +561,16 @@ def test_only_todays_unfinished_fixtures_are_watched(make_plugin, session, now_h
             ],
         ),
     )
-    plugin = make_plugin({"teams": "mechelen"})
+    plugin = make_plugin()
     now_holder["now"] = datetime(2026, 10, 31, 1, 0, tzinfo=now_holder["now"].tzinfo)
     plugin.refresh_fixtures()
     assert plugin.wanted_fixture_ids() == [1, 4, 5]  # 5 kicked off 1.5 h ago, past midnight
 
 
 def test_watched_fixtures_roll_over_at_midnight(make_plugin, session, now_holder, clock):
-    plugin = make_plugin()
+    plugin = make_plugin({"team": "barcelona"})
     plugin.refresh_fixtures()
-    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK, BARCA_ALAVES]
+    assert plugin.wanted_fixture_ids() == [BARCA_ALAVES]
     now_holder["now"] = datetime(2026, 11, 3, 12, 0, tzinfo=now_holder["now"].tzinfo)
     clock.advance(3600)
     plugin.refresh_fixtures()
@@ -559,17 +591,16 @@ def test_fixture_details_failure_falls_back_to_long_names(live_plugin, session, 
 
 
 def test_whole_match_day_stays_under_fifty_requests(make_plugin, session, clock, now_holder):
-    """24 h of listener syncs every 30 s, two matches, eight goals."""
-    from plugins.soccer_goals import SPORTAPI_TZ
+    """24 h of listener syncs every 30 s, one match, eight goals."""
+    from plugins.football_goals import SPORTAPI_TZ
 
     session.routes[EVENTS] = FakeResponse(200, events_body(MECHELEN_GENK, []))  # worst case: never found
-    session.routes[f"/fixtures/{BARCA_ALAVES}/events"] = FakeResponse(200, events_body(BARCA_ALAVES, []))
     now_holder["now"] = datetime(2026, 10, 31, 0, 0, 30, tzinfo=SPORTAPI_TZ)
     plugin = make_plugin()
     plugin.handle_connect()
     goals = {
         datetime(2026, 10, 31, 16, 20): (MECHELEN_GENK, [(0, 0), (1, 0), (1, 1), (2, 1), (3, 1)]),
-        datetime(2026, 10, 31, 21, 20): (BARCA_ALAVES, [(0, 0), (1, 0), (2, 0), (2, 1), (3, 1)]),
+        datetime(2026, 10, 31, 17, 20): (MECHELEN_GENK, [(4, 1), (4, 2), (5, 2), (5, 3)]),
     }
     for step in range(24 * 120):
         plugin.refresh_fixtures()
@@ -585,7 +616,7 @@ def test_whole_match_day_stays_under_fifty_requests(make_plugin, session, clock,
     paths = session.paths()
     team_calls = [p for p in paths if p.startswith("/teams/")]
     assert len([p for p in paths if p.endswith("/events")]) == 8 * 3
-    assert len(team_calls) <= 2 * 9
+    assert len(team_calls) <= 9
     assert len(paths) < 50, paths
 
 
@@ -609,7 +640,7 @@ def test_restart_mid_match_finds_the_running_match(make_plugin, session, trigger
             ],
         },
     )
-    plugin = make_plugin({"teams": "mechelen"})
+    plugin = make_plugin()
     plugin.refresh_fixtures()
     plugin.refresh_fixtures()  # checked once per start only
     assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
@@ -628,7 +659,7 @@ def test_live_check_failure_is_logged(make_plugin, session, caplog):
     plugin = make_plugin()
     plugin.refresh_fixtures()
     assert "Live fixture check failed" in caplog.text
-    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK, BARCA_ALAVES]
+    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
 
 
 def test_running_match_stays_watched_when_it_leaves_the_team_list(make_plugin, session, clock):
@@ -652,15 +683,20 @@ def test_settings_change_keeps_team_lookups_with_same_key(make_plugin, session):
     plugin = make_plugin()
     plugin.refresh_fixtures()
     team_calls = len([p for p in session.paths() if p.startswith("/teams/")])
-    plugin.config = dict(plugin.config, teams="mechelen", goals_shown="selected")
+    plugin.config = dict(plugin.config, trigger_duration_seconds=90)
     plugin.refresh_fixtures()
     assert len([p for p in session.paths() if p.startswith("/teams/")]) == team_calls
     assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
 
+    plugin.config = dict(plugin.config, team="barcelona")
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/barcelona") == 1
+    assert plugin.wanted_fixture_ids() == [BARCA_ALAVES]
+
     plugin.config = dict(plugin.config, api_key="sk_live_OTHER")
     plugin.refresh_fixtures()
     assert session.calls[-1]["headers"]["X-Api-Key"] == "sk_live_OTHER"
-    assert len([p for p in session.paths() if p.startswith("/teams/")]) == team_calls + 1
+    assert len([p for p in session.paths() if p.startswith("/teams/")]) == team_calls + 2
 
 
 # ── review fixes ─────────────────────────────────────────────────────────────
@@ -671,7 +707,7 @@ def test_failed_team_lookup_is_retried_after_one_hour(make_plugin, session, cloc
         FakeResponse(500, {}),
         session.routes["/teams/slug/mechelen"],
     ]
-    plugin = make_plugin({"teams": "mechelen"})
+    plugin = make_plugin()
     plugin.refresh_fixtures()
     assert plugin.wanted_fixture_ids() == []
     clock.advance(1800)
@@ -697,25 +733,6 @@ def test_failed_live_check_is_retried_at_most_hourly(make_plugin, session, clock
     assert session.paths().count(path) == 2
 
 
-def test_newer_goal_in_other_match_stops_older_retries(live_plugin, session, now_holder, trigger_service):
-    session.routes[f"/fixtures/{BARCA_ALAVES}/events"] = FakeResponse(
-        200, events_body(BARCA_ALAVES, [goal_event("R. Lewandowski", "3'")])
-    )
-    plugin = live_plugin()
-    pending = []
-    plugin._spawn = lambda target, *args: pending.append((target, args))
-    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
-    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
-    now_holder["now"] += timedelta(hours=5)
-    plugin.handle_score_update(score(BARCA_ALAVES, 1, 0))
-    pending[1][0](*pending[1][1])  # Barcelona goal fires
-    before = len(session.calls)
-    pending[0][0](*pending[0][1])  # stale Mechelen announcement: nothing
-    [trigger] = plugin_triggers(trigger_service)
-    assert trigger.trigger_id == f"soccer_goals_{BARCA_ALAVES}_1_0"
-    assert len(session.calls) == before + 1  # only its first lookup
-
-
 def test_dead_listener_is_replaced(make_plugin):
     class DeadListener:
         stopped = False
@@ -738,3 +755,137 @@ def test_dead_listener_is_replaced(make_plugin):
     first = plugin._listener
     plugin.fetch_data()
     assert plugin._listener is not first
+
+
+# ── template variables follow the team's match ──────────────────────────────
+
+
+def variables(plugin):
+    data = plugin.fetch_data().data
+    return (data["home_team"], data["away_team"], data["score"], data["scorer"], data["minute"])
+
+
+def test_variables_while_scorer_is_pending(live_plugin, session, clock):
+    """Matrix: scorer not yet published -> score set, scorer/minute empty, filled on retry."""
+    session.routes[EVENTS] = [
+        FakeResponse(200, events_body(MECHELEN_GENK, [])),
+        FakeResponse(200, events_body(MECHELEN_GENK, [goal_event("S. Michez", "22'")])),
+    ]
+    plugin = live_plugin()
+    seen = []
+    original = plugin._wait
+
+    def wait(stop_event, seconds):
+        seen.append(variables(plugin))
+        return original(stop_event, seconds)
+
+    plugin._wait = wait
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    assert seen[0] == ("MECHELEN", "GENK", "1-0", "", "")
+    assert variables(plugin) == ("MECHELEN", "GENK", "1-0", "S. MICHEZ", "22'")
+
+
+def test_variables_stay_empty_when_scorer_never_found(live_plugin, session):
+    session.routes[EVENTS] = FakeResponse(200, events_body(MECHELEN_GENK, []))
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    assert variables(plugin) == ("MECHELEN", "GENK", "1-0", "", "")
+
+
+def test_new_goal_clears_previous_scorer_until_listed(live_plugin, session):
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    assert variables(plugin)[3] == "S. MICHEZ"
+    plugin.handle_score_update(score(MECHELEN_GENK, 2, 0))  # /events still lists one goal
+    assert variables(plugin) == ("MECHELEN", "GENK", "2-0", "", "")
+
+
+def test_disallowed_goal_lowers_live_score_without_trigger(live_plugin, session, trigger_service):
+    """Matrix: 1-1 -> 1-0 gives no trigger, score=1-0."""
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 1))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    assert plugin_triggers(trigger_service) == []
+    assert variables(plugin) == ("MECHELEN", "GENK", "1-0", "", "")
+
+
+def test_running_match_without_push_shows_its_teams(make_plugin):
+    plugin = make_plugin()
+    plugin.refresh_fixtures()
+    assert variables(plugin) == ("MECHELEN", "GENK", "", "", "")
+
+
+def test_no_match_known_gives_empty_variables(make_plugin):
+    assert variables(make_plugin()) == ("", "", "", "", "")
+
+
+def test_final_state_is_kept_two_hours_then_next_match(live_plugin, session, clock, now_holder):
+    """Matrix: status FT, 2-1 -> final values kept 2 h, then the next match."""
+    session.routes[f"/fixtures/{BARCA_ALAVES}/events"] = FakeResponse(
+        200, events_body(BARCA_ALAVES, [goal_event("A", "5'"), goal_event("B", "9'", "away"), goal_event("R. Lewandowski", "88'")])
+    )
+    plugin = live_plugin({"team": "barcelona"})
+    now_holder["now"] += timedelta(hours=5)  # 21:30
+    plugin.handle_score_update(score(BARCA_ALAVES, 1, 1))  # first push: baseline
+    plugin.handle_score_update(score(BARCA_ALAVES, 2, 1, minute="88'"))
+    plugin.handle_score_update(score(BARCA_ALAVES, 2, 1, status="FT"))
+    final = ("BARCELONA", "ALAVES", "2-1", "R. LEWANDOWSKI", "88'")
+    assert variables(plugin) == final
+    clock.advance(2 * 3600 - 60)
+    now_holder["now"] += timedelta(hours=2)
+    assert variables(plugin) == final
+    clock.advance(120)
+    assert variables(plugin) == ("BARCELONA", "ASTON VILLA", "", "", "")
+
+
+def test_team_list_reporting_full_time_starts_the_hold(live_plugin, session, clock, now_holder):
+    from .conftest import fixture_item, team_body
+
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 2, 1))
+    session.routes["/teams/slug/mechelen"] = FakeResponse(
+        200,
+        team_body("mechelen", 149, [], results=[
+            fixture_item(MECHELEN_GENK, "2026-10-31 16:00:00", "mechelen", "Mechelen", "racing-genk", "Racing Genk", status="FT")
+        ]),
+    )
+    clock.advance(4 * 3600)
+    plugin.refresh_fixtures()
+    assert variables(plugin)[2] == "2-1"
+    clock.advance(2 * 3600)
+    assert variables(plugin) == ("", "", "", "", "")
+
+
+def test_match_without_full_time_push_ends_after_live_window(live_plugin, clock, now_holder):
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 3, 0))
+    now_holder["now"] += timedelta(hours=4)  # 20:30, kicked off 4.5 h ago
+    assert variables(plugin)[2] == "3-0"
+    clock.advance(2 * 3600)
+    assert variables(plugin)[2] == ""
+
+
+def test_changing_team_drops_the_old_match(live_plugin):
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    plugin.config = dict(plugin.config, team="barcelona")
+    plugin.refresh_fixtures()
+    assert variables(plugin) == ("BARCELONA", "ALAVES", "", "", "")
+
+
+def test_acceptance_barcelona_goal_fills_all_five_variables(live_plugin, session, now_holder, trigger_service):
+    session.routes[f"/fixtures/{BARCA_ALAVES}/events"] = FakeResponse(
+        200, events_body(BARCA_ALAVES, [goal_event("R. Lewandowski", "3'")])
+    )
+    plugin = live_plugin({"team": "barcelona"})
+    now_holder["now"] += timedelta(hours=5)
+    plugin.handle_score_update(score(BARCA_ALAVES, 1, 0))
+    [trigger] = plugin_triggers(trigger_service)
+    assert trigger.trigger_id == f"football_goals_{BARCA_ALAVES}_1_0"
+    assert trigger.message == "GOAL!\nBARCELONA 1-0 ALAVES\nR. LEWANDOWSKI 3'"
+    assert plugin.fetch_data().data == {
+        "home_team": "BARCELONA", "away_team": "ALAVES", "score": "1-0", "scorer": "R. LEWANDOWSKI", "minute": "3'",
+    }

@@ -1,8 +1,8 @@
-"""Test fixtures for the Soccer Goal Notifier plugin.
+"""Test fixtures for the Football Goal Notifier plugin.
 
 The tests run against a FiestaBoard core checkout (see README, "Plugin
 tests"): ``src.*`` must be importable and this repo linked as
-``plugins/soccer_goals``. Host imports happen inside fixtures (lazily), so
+``plugins/football_goals``. Host imports happen inside fixtures (lazily), so
 collecting this file does not need the core on the path.
 
 No test touches the network: HTTP goes through :class:`FakeSession`, the
@@ -189,7 +189,7 @@ def now_holder():
 
     Mechelen-Genk (16:00) is live; Barcelona-Alaves (21:00) is later today.
     """
-    from plugins.soccer_goals import SPORTAPI_TZ
+    from plugins.football_goals import SPORTAPI_TZ
 
     return {"now": datetime(2026, 10, 31, 16, 30, tzinfo=SPORTAPI_TZ)}
 
@@ -201,7 +201,7 @@ def make_plugin(manifest, session, clock, now_holder):
     Goal announcements run synchronously; scorer retries advance the fake
     clock instead of sleeping. No listener is started unless a test asks.
     """
-    from plugins.soccer_goals import Plugin, sportapi
+    from plugins.football_goals import Plugin, sportapi
 
     created = []
 
@@ -220,7 +220,7 @@ def make_plugin(manifest, session, clock, now_holder):
         if not start_listener:
             plugin._ensure_listener = lambda: None
         plugin.config = dict(
-            {"api_key": TEST_KEY, "teams": "mechelen, barcelona", "goals_shown": "all", "trigger_duration_seconds": 60},
+            {"api_key": TEST_KEY, "team": "mechelen", "trigger_duration_seconds": 60},
             **(config or {}),
         )
         plugin.enabled = True

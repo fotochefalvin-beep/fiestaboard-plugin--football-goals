@@ -16,7 +16,7 @@ jobs:
       # inside it would bring its own requirements.txt and sources along).
       - uses: actions/checkout@v4
         with:
-          path: soccer_goals
+          path: football_goals
       - uses: actions/checkout@v4
         with:
           repository: Fiestaboard/FiestaBoard
@@ -41,7 +41,7 @@ jobs:
           import json, sys
           sys.path.insert(0, 'fiestaboard-core')
           from src.plugins.manifest import validate_manifest
-          with open('soccer_goals/manifest.json') as f:
+          with open('football_goals/manifest.json') as f:
               m = json.load(f)
           ok, errors = validate_manifest(m)
           if not ok:
@@ -59,7 +59,7 @@ jobs:
           from pathlib import Path
           from src.plugins.install_check import validate_install
           from src.plugins.manifest import PluginManifest
-          plugin_dir = Path('soccer_goals').resolve()
+          plugin_dir = Path('football_goals').resolve()
           m = json.loads((plugin_dir / 'manifest.json').read_text())
           result = validate_install(m['id'], plugin_dir, PluginManifest.from_dict(m))
           for w in result.warnings:
@@ -72,13 +72,13 @@ jobs:
           "
       - name: Set up plugin directory structure
         run: |
-          PLUGIN_ID=$(python -c "import json; print(json.load(open('soccer_goals/manifest.json'))['id'])")
-          test "$PLUGIN_ID" = "soccer_goals"
+          PLUGIN_ID=$(python -c "import json; print(json.load(open('football_goals/manifest.json'))['id'])")
+          test "$PLUGIN_ID" = "football_goals"
           mkdir -p plugins
           touch plugins/__init__.py
-          ln -s ../soccer_goals "plugins/$PLUGIN_ID"
+          ln -s ../football_goals "plugins/$PLUGIN_ID"
       - name: Run plugin tests
-        working-directory: soccer_goals
+        working-directory: football_goals
         env:
           PYTHONPATH: "${{ github.workspace }}:${{ github.workspace }}/fiestaboard-core"
           BOARD_READ_WRITE_KEY: test_key

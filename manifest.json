@@ -1,12 +1,12 @@
 {
-  "id": "soccer_goals",
-  "name": "Soccer Goal Notifier",
-  "version": "0.1.0",
-  "description": "Announce goals in matches of the football teams you follow (GOAL! / MECHELEN 1-0 GENK / S. MICHEZ 22'), pushed live by sportapi.ai.",
+  "id": "football_goals",
+  "name": "Football Goal Notifier",
+  "version": "0.2.0",
+  "description": "Announce goals in matches of the football team you follow (GOAL! / MECHELEN 1-0 GENK / S. MICHEZ 22'), pushed live by sportapi.ai.",
   "author": "Alvin To",
   "icon": "trophy",
   "category": "sports",
-  "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--soccer-goals",
+  "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--football-goals",
   "documentation": "README.md",
   "supports_triggers": true,
   "settings_schema": {
@@ -23,18 +23,11 @@
         "description": "Your sportapi.ai key (starts with sk_live_). Free plan: create one at sportapi.ai/dashboard.",
         "ui:widget": "password"
       },
-      "teams": {
+      "team": {
         "type": "string",
-        "title": "Teams",
-        "description": "Comma-separated sportapi.ai team slugs, e.g. \"mechelen, barcelona\". Spaces become hyphens (\"Racing Genk\" -> racing-genk).",
-        "default": "mechelen, barcelona"
-      },
-      "goals_shown": {
-        "type": "string",
-        "title": "Goals Shown",
-        "description": "\"all\": every goal in a watched team's match, including goals against them. \"selected\": only goals scored by one of your teams.",
-        "enum": ["all", "selected"],
-        "default": "all"
+        "title": "Team",
+        "description": "One sportapi.ai team slug, e.g. \"mechelen\". Spaces become hyphens (\"Racing Genk\" -> racing-genk). Every goal in this team's matches is shown, including goals against them.",
+        "default": "mechelen"
       },
       "trigger_duration_seconds": {
         "type": "integer",
@@ -44,47 +37,58 @@
         "minimum": 10
       }
     },
-    "required": ["api_key", "teams"]
+    "required": [
+      "api_key",
+      "team"
+    ]
   },
   "variables": {
     "groups": {
-      "goal": {
-        "label": "Last Goal"
+      "match": {
+        "label": "Match"
       }
     },
     "simple": {
-      "match": {
-        "description": "The match with the score after the last goal (or the next watched match, e.g. BARCELONA - ALAVES, when there was no goal in the last two hours)",
+      "home_team": {
+        "description": "Home team of your team's current match (before kick-off: the next match; after full time the final state stays for two hours)",
         "type": "string",
         "max_length": 22,
-        "group": "goal",
-        "example": "MECHELEN 1-0 GENK"
+        "group": "match",
+        "example": "MECHELEN"
+      },
+      "away_team": {
+        "description": "Away team of that match",
+        "type": "string",
+        "max_length": 22,
+        "group": "match",
+        "example": "GENK"
       },
       "score": {
-        "description": "Score after the last goal",
+        "description": "Live score of that match (empty before kick-off)",
         "type": "string",
         "max_length": 22,
-        "group": "goal",
+        "group": "match",
         "example": "1-0"
       },
       "scorer": {
-        "description": "Scorer of the last goal (empty until sportapi.ai lists it)",
+        "description": "Scorer of the latest goal in that match (empty until sportapi.ai lists it)",
         "type": "string",
         "max_length": 22,
-        "group": "goal",
+        "group": "match",
         "example": "S. MICHEZ"
       },
       "minute": {
-        "description": "Minute of the last goal",
+        "description": "Minute of the latest goal in that match",
         "type": "string",
         "max_length": 22,
-        "group": "goal",
+        "group": "match",
         "example": "22'"
       }
     }
   },
   "max_lengths": {
-    "match": 22,
+    "home_team": 22,
+    "away_team": 22,
     "score": 22,
     "scorer": 22,
     "minute": 22

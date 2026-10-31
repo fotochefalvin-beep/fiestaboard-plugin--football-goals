@@ -1,4 +1,4 @@
-"""sportapi.ai I/O for the Soccer Goal Notifier plugin.
+"""sportapi.ai I/O for the Football Goal Notifier plugin.
 
 Two pieces, both kept apart from the plugin so they can be tested with fakes:
 
@@ -260,8 +260,8 @@ class ScoreListener:
     def start(self) -> None:
         if self._thread is not None:
             return
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="soccer-goals-rest")
-        self._thread = threading.Thread(target=self._run_thread, name="soccer-goals-ws", daemon=True)
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="football-goals-rest")
+        self._thread = threading.Thread(target=self._run_thread, name="football-goals-ws", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 10.0) -> bool:

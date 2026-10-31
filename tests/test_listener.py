@@ -78,7 +78,7 @@ def wait_until(predicate, timeout=5.0):
 
 
 def make_listener(server, wanted=(MECHELEN_GENK,), **kwargs):
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     updates, connects = [], []
     defaults = dict(
@@ -101,7 +101,7 @@ CONNECTED = {"type": "connected", "message": "Authenticated."}
 
 
 def test_spec_backoff_constants():
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     assert sportapi.BACKOFF_MIN_SECONDS == 5
     assert sportapi.BACKOFF_MAX_SECONDS == 300
@@ -179,7 +179,7 @@ def test_drops_reconnect_with_doubling_backoff():
 
 
 def test_stable_connection_resets_backoff(monkeypatch):
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     monkeypatch.setattr(sportapi, "STABLE_CONNECTION_SECONDS", 0.0)
     server = FakeServer([[CONNECTED, "CLOSE"], [CONNECTED, "CLOSE"], [CONNECTED, "CLOSE"], [CONNECTED]])
@@ -258,7 +258,7 @@ def test_stop_is_prompt_even_during_slow_refresh():
 
 
 def test_sleep_and_refresh_after_executor_shutdown():
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     listener, _, _ = make_listener(FakeServer([]))
     listener._executor = __import__("concurrent.futures").futures.ThreadPoolExecutor(1)
@@ -271,7 +271,7 @@ def test_sleep_and_refresh_after_executor_shutdown():
 
 
 def test_config_change_and_cleanup_leave_no_listener_threads(make_plugin, session):
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     servers = []
 
@@ -283,7 +283,7 @@ def test_config_change_and_cleanup_leave_no_listener_threads(make_plugin, sessio
         )
 
     def ws_threads():
-        return [t for t in threading.enumerate() if t.name == "soccer-goals-ws" and t.is_alive()]
+        return [t for t in threading.enumerate() if t.name == "football-goals-ws" and t.is_alive()]
 
     baseline = len(ws_threads())
     plugin = make_plugin(start_listener=True)
@@ -295,7 +295,7 @@ def test_config_change_and_cleanup_leave_no_listener_threads(make_plugin, sessio
     assert plugin._listener is first
     assert len(ws_threads()) == baseline + 1
 
-    plugin.config = dict(plugin.config, teams="mechelen")
+    plugin.config = dict(plugin.config, team="barcelona")
     assert not first.is_alive()
     assert servers[0].sockets[0].closed
     assert wait_until(lambda: len(ws_threads()) == baseline + 1)
@@ -308,7 +308,7 @@ def test_config_change_and_cleanup_leave_no_listener_threads(make_plugin, sessio
 
 
 def test_disabling_the_plugin_stops_the_listener(make_plugin):
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     server = FakeServer([[CONNECTED]])
     plugin = make_plugin(start_listener=True)
@@ -324,7 +324,7 @@ def test_disabling_the_plugin_stops_the_listener(make_plugin):
 
 
 def test_client_errors_and_rate_limit():
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     clock = FakeClock()
     session = FakeSession(
@@ -360,7 +360,7 @@ def test_client_errors_and_rate_limit():
 def test_client_network_error_never_shows_key():
     import requests
 
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     class Broken:
         def get(self, url, headers=None, timeout=None):
@@ -377,13 +377,13 @@ def test_client_network_error_never_shows_key():
 def test_default_client_uses_requests_session():
     import requests
 
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     assert isinstance(sportapi.SportApiClient(TEST_KEY)._session, requests.Session)
 
 
 def test_key_is_url_encoded_in_ws_url():
-    from plugins.soccer_goals import sportapi
+    from plugins.football_goals import sportapi
 
     listener = sportapi.ScoreListener("a+b/c&d=e", wanted=lambda: [], on_update=lambda m: None)
     assert listener._url.endswith("?key=a%2Bb%2Fc%26d%3De")

@@ -1,6 +1,6 @@
 # Plugin coverage only: the plugin package (__init__.py, sportapi.py).
 [run]
-source = plugins.soccer_goals
+source = plugins.football_goals
 omit =
     */tests/*
 

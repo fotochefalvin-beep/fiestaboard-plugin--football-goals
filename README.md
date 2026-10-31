@@ -1,7 +1,7 @@
-# Soccer Goal Notifier
+# Football Goal Notifier
 
 A [FiestaBoard](https://github.com/Fiestaboard/FiestaBoard) plugin that puts a
-goal on the board as soon as it is scored in a match of a team you follow:
+goal on the board as soon as it is scored in a match of the team you follow:
 
 ```
 GOAL!
@@ -18,11 +18,12 @@ scored.
 ## How it works
 
 - Once an hour at most (normally every 3 hours, and once after midnight) the
-  plugin looks up each team's fixtures (`/teams/slug/{slug}`), and subscribes
+  plugin looks up the team's fixtures (`/teams/slug/{slug}`), and subscribes
   over `wss://sportapi.ai/ws` to the matches played **today**.
 - When a `score_update` shows a higher total than before, it fetches the
   scorer from `/fixtures/{id}/events` and fires a trigger (priority
-  `NOTABLE`). A newer goal replaces the previous goal on the board.
+  `NOTABLE`). Every goal in the team's match is announced, goals against
+  them too. A newer goal replaces the previous goal on the board.
 - If sportapi.ai does not list the scorer yet, the goal is shown without the
   third line straight away, and `/events` is retried after 20 s and 60 s; the
   same trigger is shown again with the scorer once it appears.
@@ -38,8 +39,7 @@ scored.
 ### Request budget
 
 The free sportapi.ai plan allows 2,000 requests a day and 14,000 a month.
-A match day with two teams costs about 20–30 requests: ≤ 9 team lookups per
-team, one `/fixtures/{id}` per match (short team names), one
+A match day costs about 15–25 requests: ≤ 9 team lookups, one `/fixtures/{id}` per match (short team names), one
 `/fixtures/date` call per start, and per goal one `/events` call plus at most
 two retries. A `429` is respected (`Retry-After`): the goal is shown without
 the scorer.
@@ -49,8 +49,7 @@ the scorer.
 | Setting | Default | Meaning |
 |---|---|---|
 | sportapi.ai API Key | – | Your key (password field). Never logged. |
-| Teams | `mechelen, barcelona` | Comma-separated sportapi.ai team slugs. Names are turned into slugs (`Racing Genk` → `racing-genk`). |
-| Goals Shown | `all` | `all`: every goal in a watched team's match, including goals against them. `selected`: only goals scored by one of your teams. |
+| Team | `mechelen` | **One** sportapi.ai team slug. A name is turned into a slug (`Racing Genk` → `racing-genk`). A value with a comma is rejected (`Enter one team`). |
 | Trigger Duration (seconds) | `60` | How long a goal stays on the board (min 10). |
 
 A team sportapi.ai does not know is logged and reported when you save the
@@ -59,11 +58,36 @@ sportapi.ai, or see [docs/SETUP.md](docs/SETUP.md).
 
 ### Template variables
 
-`{{soccer_goals.match}}`, `{{soccer_goals.score}}`,
-`{{soccer_goals.scorer}}`, `{{soccer_goals.minute}}` (each ≤ 22 characters)
-hold the last goal for two hours. Without a recent goal, `match` holds the
-next watched match (`BARCELONA - ALAVES`). Set the plugin's *trigger page*
-to render a goal with your own template.
+Each variable is upper-case ASCII, at most 22 characters, and follows your
+team's match, so a template can lay the pieces out freely:
+
+| Variable | Example | Holds |
+|---|---|---|
+| `{{football_goals.home_team}}` | `MECHELEN` | Home team (short name when known) |
+| `{{football_goals.away_team}}` | `GENK` | Away team (short name when known) |
+| `{{football_goals.score}}` | `1-0` | Live score: follows every score push, also a disallowed goal going back down |
+| `{{football_goals.scorer}}` | `S. MICHEZ` | Scorer of the latest goal |
+| `{{football_goals.minute}}` | `22'` | Minute of the latest goal |
+
+- **Before kick-off:** `home_team`/`away_team` are the next match, the rest
+  is empty (all empty when no match is known).
+- **During the match:** the live teams and score. `scorer`/`minute` are
+  empty until sportapi.ai lists the latest goal in `/events` (checked right
+  away, then after 20 s and 60 s), and empty before the first goal.
+- **After full time:** the final state stays for two hours, then the next
+  match.
+
+The plugin's own page keeps showing `GOAL! / MECHELEN 1-0 GENK / S. MICHEZ
+22'` for two hours after a goal, else `NEXT MATCH`. Set the plugin's
+*trigger page* to render a goal with your own template.
+
+### Upgrading from 0.1.x
+
+0.2.0 renamed the plugin (id `football_goals`): remove the 0.1.x plugin and
+install this one again, then re-enter the key and team (templates use
+`{{football_goals.*}}` now). A config that still holds the old `teams`
+setting keeps working: only its first team is followed (logged once). The `goals_shown` setting is gone; every
+goal is shown.
 
 ## Requirements
 
@@ -79,7 +103,7 @@ to render a goal with your own template.
 
 The tests run against a checkout of
 [FiestaBoard core](https://github.com/Fiestaboard/FiestaBoard) at `v9.13.0`,
-with this repo linked as `plugins/soccer_goals`. They never touch the network
+with this repo linked as `plugins/football_goals`. They never touch the network
 (HTTP and the WebSocket are faked). `.github/workflows/ci.yml` is the
 canonical recipe; locally, from the folder that *contains* this repo:
 
@@ -89,9 +113,9 @@ python3.11 -m venv .venv-fb && source .venv-fb/bin/activate
 pip install -r fiestaboard-core/requirements.txt pytest pytest-cov
 
 mkdir -p plugins && touch plugins/__init__.py
-ln -s ../fiestaboard-plugin--soccer-goals plugins/soccer_goals
+ln -s ../fiestaboard-plugin--football-goals plugins/football_goals
 
-cd fiestaboard-plugin--soccer-goals
+cd fiestaboard-plugin--football-goals
 PYTHONPATH="$(cd .. && pwd):$(cd ../fiestaboard-core && pwd)" \
 BOARD_READ_WRITE_KEY=test_key \
 python -m pytest tests/ -v --cov --cov-report=term-missing

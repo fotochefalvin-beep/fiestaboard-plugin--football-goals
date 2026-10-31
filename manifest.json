@@ -1,7 +1,7 @@
 {
   "id": "football_goals",
   "name": "Football Goal Notifier",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Announce goals in matches of the football team you follow (GOAL! / MECHELEN 1-0 GENK / S. MICHEZ 22'), pushed live by sportapi.ai.",
   "author": "Alvin To",
   "icon": "trophy",
@@ -63,12 +63,19 @@
         "group": "match",
         "example": "GENK"
       },
-      "score": {
-        "description": "Live score of that match (empty before kick-off)",
+      "home_goals": {
+        "description": "Live goals of the home team in that match (empty before kick-off)",
         "type": "string",
         "max_length": 22,
         "group": "match",
-        "example": "1-0"
+        "example": "1"
+      },
+      "away_goals": {
+        "description": "Live goals of the away team in that match (empty before kick-off)",
+        "type": "string",
+        "max_length": 22,
+        "group": "match",
+        "example": "0"
       },
       "scorer": {
         "description": "Scorer of the latest goal in that match (empty until sportapi.ai lists it)",
@@ -89,7 +96,8 @@
   "max_lengths": {
     "home_team": 22,
     "away_team": 22,
-    "score": 22,
+    "home_goals": 22,
+    "away_goals": 22,
     "scorer": 22,
     "minute": 22
   }

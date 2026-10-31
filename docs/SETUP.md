@@ -64,9 +64,9 @@ again, and change templates to `{{football_goals.*}}`.
 ### Template variables
 
 `{{football_goals.home_team}}`, `{{football_goals.away_team}}`,
-`{{football_goals.score}}`, `{{football_goals.scorer}}`,
-`{{football_goals.minute}}`: before kick-off the next match's teams; during
-the match the live score and the latest goal's scorer and minute (empty
+`{{football_goals.home_goals}}`, `{{football_goals.away_goals}}`,
+`{{football_goals.scorer}}`, `{{football_goals.minute}}`: before kick-off
+the next match's teams; during the match the live goals per team and the latest goal's scorer and minute (empty
 until sportapi.ai lists the goal); after full time the final state for two
 hours. See the README for details.
 

@@ -65,13 +65,14 @@ team's match, so a template can lay the pieces out freely:
 |---|---|---|
 | `{{football_goals.home_team}}` | `MECHELEN` | Home team (short name when known) |
 | `{{football_goals.away_team}}` | `GENK` | Away team (short name when known) |
-| `{{football_goals.score}}` | `1-0` | Live score: follows every score push, also a disallowed goal going back down |
+| `{{football_goals.home_goals}}` | `1` | Home team's live goals: follow every score push, also a disallowed goal going back down |
+| `{{football_goals.away_goals}}` | `0` | Away team's live goals, the same way |
 | `{{football_goals.scorer}}` | `S. MICHEZ` | Scorer of the latest goal |
 | `{{football_goals.minute}}` | `22'` | Minute of the latest goal |
 
 - **Before kick-off:** `home_team`/`away_team` are the next match, the rest
   is empty (all empty when no match is known).
-- **During the match:** the live teams and score. `scorer`/`minute` are
+- **During the match:** the live teams and goals. `scorer`/`minute` are
   empty until sportapi.ai lists the latest goal in `/events` (checked right
   away, then after 20 s and 60 s), and empty before the first goal.
 - **After full time:** the final state stays for two hours, then the next
@@ -81,7 +82,12 @@ The plugin's own page keeps showing `GOAL! / MECHELEN 1-0 GENK / S. MICHEZ
 22'` for two hours after a goal, else `NEXT MATCH`. Set the plugin's
 *trigger page* to render a goal with your own template.
 
-### Upgrading from 0.1.x
+### Upgrading
+
+0.3.0 replaced `score` (`1-0`) by `home_goals` and `away_goals`; a
+template that used `{{football_goals.score}}` can use
+`{{football_goals.home_goals}}-{{football_goals.away_goals}}`.
+
 
 0.2.0 renamed the plugin (id `football_goals`): remove the 0.1.x plugin and
 install this one again, then re-enter the key and team (templates use

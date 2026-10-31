@@ -18,8 +18,8 @@ Announces goals in matches of the one team you follow, pushed by sportapi.ai:
   fired again once the scorer shows up.
 * The first update of a fixture after each (re)connect is only a baseline;
   score decreases (disallowed goals) are stored silently.
-* The template variables (``home_team``, ``away_team``, ``score``,
-  ``scorer``, ``minute``) follow the team's match: the next match before
+* The template variables (``home_team``, ``away_team``, ``home_goals``,
+  ``away_goals``, ``scorer``, ``minute``) follow the team's match: the next match before
   kick-off, the live score during it (scorer/minute = latest goal), the final
   state for two hours after full time.
 
@@ -59,7 +59,7 @@ DEFAULT_ROWS = 6
 MAX_VARIABLE_LENGTH = 22
 DEFAULT_TRIGGER_DURATION = 60
 MIN_TRIGGER_DURATION = 10
-VARIABLES = ("home_team", "away_team", "score", "scorer", "minute")
+VARIABLES = ("home_team", "away_team", "home_goals", "away_goals", "scorer", "minute")
 
 # Team lookups: the spec allows at most one per hour per team; every 3 hours
 # (plus once when the day changes) keeps a match day well under 50 requests.
@@ -727,16 +727,19 @@ class FootballGoalsPlugin(PluginBase):
             line = fit_scorer_line(scorer, minute, goal_tag(goal.get("extra_info")), cols)
             if line:
                 lines.append(line)
-        data = self._variables(fixture, f"{home}-{away}", scorer, minute)
+        data = self._variables(fixture, (home, away), scorer, minute)
         return lines, data
 
     @staticmethod
-    def _variables(fixture: Optional[Fixture], score: str = "", scorer: str = "", minute: str = "") -> Dict[str, str]:
-        """The five template variables, upper-case ASCII, each <= 22 chars."""
+    def _variables(
+        fixture: Optional[Fixture], score: Optional[Tuple[int, int]] = None, scorer: str = "", minute: str = ""
+    ) -> Dict[str, str]:
+        """The six template variables, upper-case ASCII, each <= 22 chars."""
         values = {
             "home_team": board_text(fixture.home_label) if fixture is not None else "",
             "away_team": board_text(fixture.away_label) if fixture is not None else "",
-            "score": score,
+            "home_goals": str(score[0]) if score is not None else "",
+            "away_goals": str(score[1]) if score is not None else "",
             "scorer": board_text(scorer),
             "minute": board_text(minute),
         }
@@ -815,8 +818,7 @@ class FootballGoalsPlugin(PluginBase):
                     match["finished_at"] = self._clock()  # no full-time push seen
                 finished_at = match["finished_at"]
                 if finished_at is None or self._clock() - finished_at < FINAL_STATE_HOLD_SECONDS:
-                    home, away = match["score"]
-                    return self._variables(fixture, f"{home}-{away}", match["scorer"], match["minute"])
+                    return self._variables(fixture, match["score"], match["scorer"], match["minute"])
                 self._match = None
             running = [
                 f for f in self._fixtures.values()

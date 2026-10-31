@@ -373,3 +373,13 @@ def test_scoring_team_kept_after_full_time(live_plugin, session):
     plugin.handle_score_update(score(MECHELEN_GENK, 1, 0, status="FT", minute=None))
     data = plugin.fetch_data().data
     assert (data["minute"], data["scoring_team"]) == ("FT", "MECHELEN")
+
+
+def test_host_reads_new_score_right_after_goal(live_plugin):
+    """live_data: the host's get_data never serves a pre-goal page from its cache."""
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    assert plugin.get_data().formatted_lines[1] == "MECHELEN 0-0 GENK"
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    assert plugin.live_data and plugin.refresh_seconds is None
+    assert plugin.get_data().formatted_lines[1] == "MECHELEN 1-0 GENK"

@@ -119,6 +119,11 @@ page* to render a goal with your own template, e.g.
 
 ### Upgrading
 
+0.4.2 asks FiestaBoard to read the plugin on every render (`live_data`)
+instead of keeping its result for 5 minutes, so the live page shows the new
+score as soon as a goal page ends and the minute moves every minute. It
+adds no API requests.
+
 0.4.0 changed the meaning of `minute`: it is now the **live match minute**
 (`67'`, `HT`, `FT`). The minute of the latest goal moved to the new
 `goal_minute`; a template that showed `{{football_goals.scorer}}

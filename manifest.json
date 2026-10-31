@@ -1,7 +1,7 @@
 {
   "id": "football_goals",
   "name": "Football Goal Notifier",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Follow your football team live on the board (LIVE 67' / MECHELEN 1-0 GENK) and announce every goal with the team, scorer and minute (GOAL! MECHELEN / S. MICHEZ 22'), pushed by sportapi.ai.",
   "author": "Alvin To",
   "icon": "trophy",
@@ -9,6 +9,7 @@
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--football-goals",
   "documentation": "README.md",
   "supports_triggers": true,
+  "live_data": true,
   "settings_schema": {
     "type": "object",
     "properties": {

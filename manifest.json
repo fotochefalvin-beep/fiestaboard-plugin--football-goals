@@ -1,0 +1,92 @@
+{
+  "id": "soccer_goals",
+  "name": "Soccer Goal Notifier",
+  "version": "0.1.0",
+  "description": "Announce goals in matches of the football teams you follow (GOAL! / MECHELEN 1-0 GENK / S. MICHEZ 22'), pushed live by sportapi.ai.",
+  "author": "Alvin To",
+  "icon": "trophy",
+  "category": "sports",
+  "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--soccer-goals",
+  "documentation": "README.md",
+  "supports_triggers": true,
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "title": "Enabled",
+        "default": false
+      },
+      "api_key": {
+        "type": "string",
+        "title": "sportapi.ai API Key",
+        "description": "Your sportapi.ai key (starts with sk_live_). Free plan: create one at sportapi.ai/dashboard.",
+        "ui:widget": "password"
+      },
+      "teams": {
+        "type": "string",
+        "title": "Teams",
+        "description": "Comma-separated sportapi.ai team slugs, e.g. \"mechelen, barcelona\". Spaces become hyphens (\"Racing Genk\" -> racing-genk).",
+        "default": "mechelen, barcelona"
+      },
+      "goals_shown": {
+        "type": "string",
+        "title": "Goals Shown",
+        "description": "\"all\": every goal in a watched team's match, including goals against them. \"selected\": only goals scored by one of your teams.",
+        "enum": ["all", "selected"],
+        "default": "all"
+      },
+      "trigger_duration_seconds": {
+        "type": "integer",
+        "title": "Trigger Duration (seconds)",
+        "description": "How long the goal stays on the board.",
+        "default": 60,
+        "minimum": 10
+      }
+    },
+    "required": ["api_key", "teams"]
+  },
+  "variables": {
+    "groups": {
+      "goal": {
+        "label": "Last Goal"
+      }
+    },
+    "simple": {
+      "match": {
+        "description": "The match with the score after the last goal (or the next watched match, e.g. BARCELONA - ALAVES, when there was no goal in the last two hours)",
+        "type": "string",
+        "max_length": 22,
+        "group": "goal",
+        "example": "MECHELEN 1-0 GENK"
+      },
+      "score": {
+        "description": "Score after the last goal",
+        "type": "string",
+        "max_length": 22,
+        "group": "goal",
+        "example": "1-0"
+      },
+      "scorer": {
+        "description": "Scorer of the last goal (empty until sportapi.ai lists it)",
+        "type": "string",
+        "max_length": 22,
+        "group": "goal",
+        "example": "S. MICHEZ"
+      },
+      "minute": {
+        "description": "Minute of the last goal",
+        "type": "string",
+        "max_length": 22,
+        "group": "goal",
+        "example": "22'"
+      }
+    }
+  },
+  "max_lengths": {
+    "match": 22,
+    "score": 22,
+    "scorer": 22,
+    "minute": 22
+  }
+}

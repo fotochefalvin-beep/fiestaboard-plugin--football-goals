@@ -3,7 +3,8 @@
 You need a FiestaBoard (v9.13.0 or later) and a free
 [sportapi.ai](https://sportapi.ai) account. No card is needed for the free
 plan (2,000 requests a day, 14,000 a month), which is plenty: this plugin
-uses about 15–25 requests on a match day.
+uses about 130–150 requests on a match day (most of them for the live match
+minute, one request a minute while the match is played).
 
 ## How to read the commands
 
@@ -65,17 +66,30 @@ again, and change templates to `{{football_goals.*}}`.
 
 `{{football_goals.home_team}}`, `{{football_goals.away_team}}`,
 `{{football_goals.home_goals}}`, `{{football_goals.away_goals}}`,
-`{{football_goals.scorer}}`, `{{football_goals.minute}}`: before kick-off
-the next match's teams; during the match the live goals per team and the latest goal's scorer and minute (empty
-until sportapi.ai lists the goal); after full time the final state for two
-hours. See the README for details.
+`{{football_goals.minute}}`, `{{football_goals.scorer}}`,
+`{{football_goals.goal_minute}}`: before kick-off the next match's teams;
+during the match the live goals per team, the live match minute (`67'`,
+`HT`, `FT`) and the latest goal's scorer and minute (empty until
+sportapi.ai lists the goal); after full time the final state for two hours.
+See the README for details.
 
-The board shows the next watched match on a page that uses the plugin
-(`NEXT MATCH / BARCELONA - ALAVES / SAT 31 OCT 21:00`), and a goal as soon
-as it is pushed:
+**Upgrading from 0.3.x?** `minute` is now the live match minute; the latest
+goal's minute is `goal_minute`. Change templates that showed the goal minute.
+
+A page that uses the plugin shows the team's match live while it is played:
 
 ```
-GOAL!
+LIVE 67'
+MECHELEN 1-0 GENK
+S. MICHEZ 22'
+```
+
+`FT` and the final score for two hours after full time, otherwise the next
+match (`NEXT MATCH / BARCELONA - ALAVES / SAT 31 OCT 21:00`). A goal is shown
+as soon as it is pushed:
+
+```
+GOAL! MECHELEN
 MECHELEN 1-0 GENK
 S. MICHEZ 22'
 ```
@@ -100,3 +114,4 @@ scorer)`. The key never appears in the log.
 | `quota hit (HTTP 429)` | Daily/monthly limit reached; goals still show, without the scorer, until the limit resets (00:00 UTC). |
 | `WEBSOCKETS PACKAGE NOT INSTALLED` on the board | The FiestaBoard image lacks `websockets`; use the official image (it ships with it). |
 | No goal for a match | Only matches of the configured team, played today, are watched. |
+| `Live minute for ... unavailable` | The once-a-minute minute lookup failed; the board keeps the last minute and tries again a minute later (after a `429`, once `Retry-After` has passed). |

@@ -37,8 +37,8 @@ class FakeResponse:
 class FakeSession:
     """``requests.Session`` stand-in: routes by path, records every call.
 
-    ``routes[path]`` is a FakeResponse or a list of them (consumed in order,
-    the last one repeats).
+    ``routes[path]`` is a FakeResponse, a list of them (consumed in order,
+    the last one repeats) or a callable returning one.
     """
 
     def __init__(self, routes=None):
@@ -53,6 +53,8 @@ class FakeSession:
             return FakeResponse(404, {"success": False})
         if isinstance(route, list):
             return route.pop(0) if len(route) > 1 else route[0]
+        if callable(route):
+            return route()
         return route
 
     def paths(self):
@@ -111,6 +113,22 @@ def date_item(fid, home_id, away_id, status, home_short, away_short, when="2026-
 
 def fixture_details(fid, home_short, away_short):
     return {"success": True, "fixture": {"id": fid, "home_short": home_short, "away_short": away_short}}
+
+
+def live_details(fid, home, away, status="LIVE", minute="12'", home_short="Mechelen", away_short="Genk"):
+    """/fixtures/{id} of a running match: score, status and match minute."""
+    return {
+        "success": True,
+        "fixture": {
+            "id": fid,
+            "home_short": home_short,
+            "away_short": away_short,
+            "home_score": home,
+            "away_score": away,
+            "status": status,
+            "minute": minute,
+        },
+    }
 
 
 def goal_event(player, minute, side="home", extra="Goal"):

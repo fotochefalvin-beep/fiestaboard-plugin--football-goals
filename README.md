@@ -1,16 +1,26 @@
 # Football Goal Notifier
 
-A [FiestaBoard](https://github.com/Fiestaboard/FiestaBoard) plugin that puts a
-goal on the board as soon as it is scored in a match of the team you follow:
+A [FiestaBoard](https://github.com/Fiestaboard/FiestaBoard) plugin that follows
+the match of the team you follow live, and puts a goal on the board as soon
+as it is scored, naming the team that scored:
 
 ```
-GOAL!
+GOAL! MECHELEN
 MECHELEN 1-0 GENK
 S. MICHEZ 22'
 ```
 
-Scores are **pushed** by [sportapi.ai](https://sportapi.ai) over a WebSocket
-(no polling). sportapi.ai pushes a score about 30–60 s after the goal; the
+While the match is played the plugin's own page is a live scoreboard:
+
+```
+LIVE 67'
+MECHELEN 1-0 GENK
+S. MICHEZ 22'
+```
+
+Goals are **pushed** by [sportapi.ai](https://sportapi.ai) over a WebSocket
+(only the running match minute is polled, once a minute while the match is
+played). sportapi.ai pushes a score about 30–60 s after the goal; the
 board shows it on FiestaBoard's next engine pass (`polling_interval`,
 15 s by default), so expect the goal on the board 45–75 s after it was
 scored.
@@ -22,8 +32,15 @@ scored.
   over `wss://sportapi.ai/ws` to the matches played **today**.
 - When a `score_update` shows a higher total than before, it fetches the
   scorer from `/fixtures/{id}/events` and fires a trigger (priority
-  `NOTABLE`). Every goal in the team's match is announced, goals against
-  them too. A newer goal replaces the previous goal on the board.
+  `NOTABLE`). Line 1 names the team whose goals went up (`GOAL! GENK` for a
+  goal against; plain `GOAL!` when one update raises both sides). Every goal
+  in the team's match is announced, goals against them too. A newer goal
+  replaces the previous goal on the board.
+- While the team's match is live (from kick-off until `FT`, at most 4 hours)
+  the plugin asks `/fixtures/{id}` at most once a minute for the running
+  match minute and status (`HT`, `FT`). Its score only updates what is
+  shown (a push from the last 3 minutes wins over it); goals are announced
+  from WebSocket pushes only.
 - If sportapi.ai does not list the scorer yet, the goal is shown without the
   third line straight away, and `/events` is retried after 20 s and 60 s; the
   same trigger is shown again with the scorer once it appears.
@@ -39,10 +56,13 @@ scored.
 ### Request budget
 
 The free sportapi.ai plan allows 2,000 requests a day and 14,000 a month.
-A match day costs about 15–25 requests: ≤ 9 team lookups, one `/fixtures/{id}` per match (short team names), one
-`/fixtures/date` call per start, and per goal one `/events` call plus at most
-two retries. A `429` is respected (`Retry-After`): the goal is shown without
-the scorer.
+A match day costs about 130–150 requests: the live minute (one
+`/fixtures/{id}` a minute while the match is played, about 110–130), ≤ 9
+team lookups, one `/fixtures/{id}` per match (short team names), one
+`/fixtures/date` call per start, and per goal one `/events` call plus at
+most two retries. With two matches a week that is about 1,300 requests a
+month. A `429` is respected (`Retry-After`): the goal is shown without the
+scorer, and the minute stays at its last value until the wait is over.
 
 ## Settings
 
@@ -67,22 +87,39 @@ team's match, so a template can lay the pieces out freely:
 | `{{football_goals.away_team}}` | `GENK` | Away team (short name when known) |
 | `{{football_goals.home_goals}}` | `1` | Home team's live goals: follow every score push, also a disallowed goal going back down |
 | `{{football_goals.away_goals}}` | `0` | Away team's live goals, the same way |
+| `{{football_goals.minute}}` | `67'` | Live match minute: `67'`, `90'+3`, `HT`, `FT` |
 | `{{football_goals.scorer}}` | `S. MICHEZ` | Scorer of the latest goal |
-| `{{football_goals.minute}}` | `22'` | Minute of the latest goal |
+| `{{football_goals.goal_minute}}` | `22'` | Minute of the latest goal |
 
 - **Before kick-off:** `home_team`/`away_team` are the next match, the rest
   is empty (all empty when no match is known).
-- **During the match:** the live teams and goals. `scorer`/`minute` are
+- **During the match:** the live teams, goals and minute (`minute` is
+  refreshed once a minute; `HT` at half time). `scorer`/`goal_minute` are
   empty until sportapi.ai lists the latest goal in `/events` (checked right
   away, then after 20 s and 60 s), and empty before the first goal.
-- **After full time:** the final state stays for two hours, then the next
-  match.
+- **After full time:** the final state (`minute` = `FT`) stays for two
+  hours, then the next match.
 
-The plugin's own page keeps showing `GOAL! / MECHELEN 1-0 GENK / S. MICHEZ
-22'` for two hours after a goal, else `NEXT MATCH`. Set the plugin's
-*trigger page* to render a goal with your own template.
+### The plugin's page
+
+| When | Line 1 | Line 2 | Line 3 |
+|---|---|---|---|
+| Match running | `LIVE 67'` (`HT` at half time) | `MECHELEN 1-0 GENK` | latest goal `S. MICHEZ 22'` (empty before the first goal or until `/events` lists it) |
+| Two hours after full time | `FT` | `MECHELEN 2-1 GENK` | latest goal |
+| Otherwise | `NEXT MATCH` | `MECHELEN - GENK` | `SAT 31 OCT 16:00` |
+
+A running match always wins over the next one. Set the plugin's *trigger
+page* to render a goal with your own template.
 
 ### Upgrading
+
+0.4.0 changed the meaning of `minute`: it is now the **live match minute**
+(`67'`, `HT`, `FT`). The minute of the latest goal moved to the new
+`goal_minute`; a template that showed `{{football_goals.scorer}}
+{{football_goals.minute}}` should use `{{football_goals.goal_minute}}`. The
+goal alert's first line is now `GOAL! <team that scored>`, the plugin page is
+a live scoreboard during the match (it no longer shows the last goal for two
+hours), and the live minute adds about 110–130 requests per match.
 
 0.3.0 replaced `score` (`1-0`) by `home_goals` and `away_goals`; a
 template that used `{{football_goals.score}}` can use

@@ -7,9 +7,10 @@ Announces goals in matches of the one team you follow, pushed by sportapi.ai:
   It starts lazily from ``fetch_data``/``on_config_change`` and stops in
   ``cleanup()``.
 * When a fixture's total goes up, the plugin fetches the scorer from
-  ``/fixtures/{id}/events`` and fires a board trigger::
+  ``/fixtures/{id}/events`` and fires a board trigger naming the team that
+  scored::
 
-      GOAL!
+      GOAL! MECHELEN
       MECHELEN 1-0 GENK
       S. MICHEZ 22'
 
@@ -18,14 +19,23 @@ Announces goals in matches of the one team you follow, pushed by sportapi.ai:
   fired again once the scorer shows up.
 * The first update of a fixture after each (re)connect is only a baseline;
   score decreases (disallowed goals) are stored silently.
+* While the team's match is live (kick-off until full time, at most
+  ``LIVE_WINDOW``), ``/fixtures/{id}`` is polled at most once a minute for the
+  running match minute and status. Its score only updates what is shown; it
+  never fires a trigger.
+* The plugin page is a live scoreboard during the match (``LIVE 67'`` /
+  ``MECHELEN 1-0 GENK`` / ``S. MICHEZ 22'``), ``FT`` for two hours after full
+  time, else ``NEXT MATCH``.
 * The template variables (``home_team``, ``away_team``, ``home_goals``,
-  ``away_goals``, ``scorer``, ``minute``) follow the team's match: the next match before
-  kick-off, the live score during it (scorer/minute = latest goal), the final
-  state for two hours after full time.
+  ``away_goals``, ``minute``, ``scorer``, ``goal_minute``) follow the team's
+  match: the next match's teams before kick-off, the live score and minute
+  during it (scorer/goal_minute = latest goal), the final state for two hours
+  after full time.
 
 Request economy: team lookups at most once per hour per team (normally every
 ``TEAM_REFRESH_SECONDS``), one ``/fixtures/{id}`` per watched fixture, one
-``/events`` call per goal plus at most two retries.
+``/events`` call per goal plus at most two retries, and one ``/fixtures/{id}``
+a minute while the team's match is live (about 110-130 per match).
 
 The API key is never logged.
 """
@@ -59,7 +69,7 @@ DEFAULT_ROWS = 6
 MAX_VARIABLE_LENGTH = 22
 DEFAULT_TRIGGER_DURATION = 60
 MIN_TRIGGER_DURATION = 10
-VARIABLES = ("home_team", "away_team", "home_goals", "away_goals", "scorer", "minute")
+VARIABLES = ("home_team", "away_team", "home_goals", "away_goals", "minute", "scorer", "goal_minute")
 
 # Team lookups: the spec allows at most one per hour per team; every 3 hours
 # (plus once when the day changes) keeps a match day well under 50 requests.
@@ -70,10 +80,15 @@ SCORER_RETRY_DELAYS = (20, 60)
 # A fixture that kicked off this long ago is still "today's" (late kick-offs
 # run past midnight).
 LIVE_WINDOW = timedelta(hours=4)
-# How long fetch_data keeps showing the last goal, and how long the
-# variables keep a finished match's final state.
-LAST_GOAL_HOLD_SECONDS = 2 * 3600
+# How long the page and the variables keep a finished match's final state.
 FINAL_STATE_HOLD_SECONDS = 2 * 3600
+# Live minute: at most one /fixtures/{id} per this many seconds, only while
+# the team's match is live.
+LIVE_POLL_SECONDS = 60
+# A REST score never overrides a push this recent (REST may lag behind).
+PUSH_PRECEDENCE_SECONDS = 180
+# Statuses shown as "FT" (other finished statuses are shown as they are).
+FULL_TIME_STATUSES = {"FT", "AET", "PENS"}
 FINISHED_STATUSES = {"FT", "AET", "PENS", "POSTPONED", "CANCELLED", "CANCELED", "ABANDONED"}
 
 try:  # sportapi.ai `date`/`datetime` are Central European time.
@@ -137,6 +152,41 @@ def fit_scorer_line(player: str, minute: str, tag: str, cols: int) -> str:
     if room < 1:
         return base[:cols]
     return f"{player[:room].rstrip()} {minute}"
+
+
+def goal_header(team: str, cols: int) -> str:
+    """``GOAL! MECHELEN`` (the scoring team cut to fit *cols*), or ``GOAL!``."""
+    name = board_text(team)
+    room = cols - len("GOAL! ")
+    if not name or room < 1:
+        return "GOAL!"[:cols]
+    return f"GOAL! {name[:room].rstrip()}"
+
+
+def format_minute(value: Any) -> str:
+    """A match clock as sportapi.ai gives it -> ``67'`` / ``90'+3``.
+
+    ``67``, ``"67"``, ``"67'"`` -> ``67'``; ``"90+3"``, ``"90'+3"`` -> ``90'+3``;
+    anything else is upper-cased as is; ``None`` -> ``""``.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    text = str(value).strip()
+    found = re.fullmatch(r"(\d+)\s*'?\s*(?:\+\s*(\d+)\s*'?)?", text)
+    if found is None:
+        return board_text(text)
+    base, extra = found.groups()
+    return f"{int(base)}'" + (f"+{int(extra)}" if extra else "")
+
+
+def as_int(value: Any) -> Optional[int]:
+    """A score from JSON -> int, or ``None`` when it is not a whole number."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def goal_tag(extra_info: Any) -> str:
@@ -237,10 +287,6 @@ class FootballGoalsPlugin(PluginBase):
         self._board_cols = DEFAULT_COLS
         self._board_rows = DEFAULT_ROWS
         self._legacy_warned = False
-        # The last fired goal: its variables and the board lines 2-3.
-        self._last_goal: Optional[Dict[str, str]] = None
-        self._last_goal_match_line = ""
-        self._last_goal_at = 0.0
 
     def _reset_state(self) -> None:
         self._fixtures: Dict[int, Fixture] = {}
@@ -263,8 +309,13 @@ class FootballGoalsPlugin(PluginBase):
         # Plugin-wide: any newer goal (in any fixture) supersedes older ones.
         self._goal_seq = 0
         # The team's current match as seen through score pushes (see
-        # ``_match_variables``): fixture, live score, latest goal, finish time.
+        # ``_current_match``): fixture, live score, status and clock, latest
+        # goal, last push, finish time.
         self._match: Optional[Dict[str, Any]] = None
+        # Fixtures known to be over: never "running" again.
+        self._finished_ids: set = set()
+        # Last live-minute poll (clock time); throttles /fixtures/{id}.
+        self._live_polled_at = float("-inf")
 
     @property
     def plugin_id(self) -> str:
@@ -342,9 +393,8 @@ class FootballGoalsPlugin(PluginBase):
         self._stop_listener()
         with self._lock:
             if self._teams(old_config) != self._teams(new_config):
-                # Another team: the old team's match and goal no longer apply.
+                # Another team: the old team's match no longer applies.
                 self._match = None
-                self._last_goal = None
             if self._api_key(old_config) != self._api_key(new_config):
                 self._reset_state()
                 self._client = None
@@ -463,6 +513,8 @@ class FootballGoalsPlugin(PluginBase):
                 self._team_fixtures[slug] = self._parse_team_fixtures(body)
         self._check_live(client, today)
         self._rebuild_fixtures()
+        # The live poll first: its response carries the short names too.
+        self._poll_live(client)
         self._load_details(client)
 
     def _check_live(self, client: Any, today: date) -> None:
@@ -575,7 +627,7 @@ class FootballGoalsPlugin(PluginBase):
             if match is not None and match["finished_at"] is None:
                 listed = candidates.get(match["fixture"].id)
                 if listed is not None and listed.status.upper() in FINISHED_STATUSES:
-                    match["finished_at"] = self._clock()
+                    self._finish(match)
 
     def _load_details(self, client: Any) -> None:
         """One ``/fixtures/{id}`` per watched fixture, for the short team names."""
@@ -596,6 +648,73 @@ class FootballGoalsPlugin(PluginBase):
                 fixture.home_short = str(details.get("home_short") or "")
                 fixture.away_short = str(details.get("away_short") or "")
                 fixture.details_loaded = True
+
+    # live minute (REST) ------------------------------------------------------
+
+    def _running(self, now: datetime) -> Optional[Fixture]:
+        """The watched fixture being played now per its kick-off (lock held):
+        kicked off at most ``LIVE_WINDOW`` ago and not known to be finished."""
+        running = [
+            f for f in self._fixtures.values()
+            if f.kickoff is not None and f.kickoff <= now <= f.kickoff + LIVE_WINDOW
+            and f.status.upper() not in FINISHED_STATUSES and f.id not in self._finished_ids
+        ]
+        return max(running, key=lambda f: f.kickoff) if running else None
+
+    def _live_target(self, now: datetime) -> Optional[Fixture]:
+        """The match whose minute is polled (lock held): the team's current
+        match while not finished and within ``LIVE_WINDOW``, else a fixture
+        that kicked off and has sent no push yet."""
+        match = self._match
+        if match is not None and match["finished_at"] is None:
+            fixture = self._fixtures.get(match["fixture"].id, match["fixture"])
+            if fixture.kickoff is None or now - fixture.kickoff <= LIVE_WINDOW:
+                return fixture
+        return self._running(now)
+
+    def _poll_live(self, client: Any) -> None:
+        """At most one ``/fixtures/{id}`` per ``LIVE_POLL_SECONDS``, only while
+        the team's match is live: running minute, status, displayed score.
+
+        Never fires a trigger. Errors keep the last known values; a 429 makes
+        the client skip every call until ``Retry-After`` has passed.
+        """
+        now = self._now()
+        with self._lock:
+            if self._clock() - self._live_polled_at < LIVE_POLL_SECONDS:
+                return
+            fixture = self._live_target(now)
+            if fixture is None:
+                return
+            # Count the attempt, so errors never cause a request storm.
+            self._live_polled_at = self._clock()
+        try:
+            details = client.fixture(fixture.id)
+        except sportapi.ApiError as exc:
+            logger.warning("Live minute for %d unavailable: %s", fixture.id, exc)
+            return
+        with self._lock:
+            self._apply_live(fixture, details)
+
+    def _apply_live(self, fixture: Fixture, details: Dict[str, Any]) -> None:
+        """Merge a ``/fixtures/{id}`` response into the match (lock held).
+
+        Its score is shown, but a push of the last ``PUSH_PRECEDENCE_SECONDS``
+        wins (REST may still lag behind it). Baselines are never touched, so
+        goal detection stays push-only.
+        """
+        match = self._match
+        own = match is not None and match["fixture"].id == fixture.id
+        home, away = as_int(details.get("home_score")), as_int(details.get("away_score"))
+        score: Optional[Tuple[int, int]] = (home, away) if home is not None and away is not None else None
+        if own and (score is None or (match["pushed_at"] is not None
+                                      and self._clock() - match["pushed_at"] < PUSH_PRECEDENCE_SECONDS)):
+            score = match["score"]
+        if not fixture.details_loaded:
+            fixture.home_short = str(details.get("home_short") or "")
+            fixture.away_short = str(details.get("away_short") or "")
+            fixture.details_loaded = True
+        self._track_match(fixture, score, details.get("status"), details.get("minute"))
 
     def wanted_fixture_ids(self) -> List[int]:
         """Fixture ids the listener subscribes to.
@@ -631,13 +750,12 @@ class FootballGoalsPlugin(PluginBase):
             fixture = self._fixtures.get(fixture_id)
             if fixture is None:
                 return  # not a watched fixture
-            if message.get("status"):
-                fixture.status = str(message["status"])
             previous = self._baselines.get(fixture_id)
             first = fixture_id not in self._seen
             self._seen.add(fixture_id)
             self._baselines[fixture_id] = (home, away)
-            match = self._track_match(fixture, home, away)
+            match = self._track_match(fixture, (home, away), message.get("status"), message.get("minute"))
+            match["pushed_at"] = self._clock()
             if first or previous is None:
                 return  # snapshot after (re)connect: baseline only
             if home + away <= previous[0] + previous[1]:
@@ -647,31 +765,46 @@ class FootballGoalsPlugin(PluginBase):
             seq = self._goal_seq
             match["goal_seq"] = seq
             stop_event = self._stop_event
-        self._spawn(self._announce_goal, fixture, home, away, seq, stop_event)
+        # The side whose goals went up (both at once: name no team).
+        home_up, away_up = home > previous[0], away > previous[1]
+        side = "home" if home_up and not away_up else "away" if away_up and not home_up else ""
+        self._spawn(self._announce_goal, fixture, home, away, seq, stop_event, side)
 
-    def _track_match(self, fixture: Fixture, home: int, away: int) -> Dict[str, Any]:
-        """Follow the live score of the team's match (lock held).
+    def _track_match(
+        self, fixture: Fixture, score: Optional[Tuple[int, int]], status: Any = None, clock: Any = None
+    ) -> Dict[str, Any]:
+        """Follow the team's match (lock held): live score, status, clock.
 
         Every push counts, a decrease too. When the score changes, the latest
-        goal's scorer/minute are cleared until ``/events`` names the goal that
-        led to the new score.
+        goal's scorer/goal_minute are cleared until ``/events`` names the goal
+        that led to the new score.
         """
         match = self._match
         if match is None or match["fixture"].id != fixture.id:
-            match = {"fixture": fixture, "score": None, "scorer": "", "minute": "",
-                     "goal_seq": None, "finished_at": None}
+            match = {"fixture": fixture, "score": None, "status": "", "clock": None, "scorer": "",
+                     "goal_minute": "", "goal_seq": None, "pushed_at": None, "finished_at": None}
             self._match = match
         match["fixture"] = fixture
-        if match["score"] != (home, away):
-            match["score"] = (home, away)
-            match["scorer"] = match["minute"] = ""
+        if status:
+            fixture.status = match["status"] = str(status)
+        if clock is not None and str(clock).strip():
+            match["clock"] = clock
+        if score is not None and match["score"] != score:
+            match["score"] = score
+            match["scorer"] = match["goal_minute"] = ""
             match["goal_seq"] = None
-        if fixture.status.upper() in FINISHED_STATUSES:
-            if match["finished_at"] is None:
-                match["finished_at"] = self._clock()
+        if (match["status"] or fixture.status).upper() in FINISHED_STATUSES:
+            self._finish(match)
         else:
             match["finished_at"] = None
+            self._finished_ids.discard(fixture.id)
         return match
+
+    def _finish(self, match: Dict[str, Any]) -> None:
+        """Mark the match finished now, unless it already is (lock held)."""
+        if match["finished_at"] is None:
+            match["finished_at"] = self._clock()
+        self._finished_ids.add(match["fixture"].id)
 
     def _spawn(self, target: Callable[..., None], *args: Any) -> None:
         """Run a goal announcement off the listener thread (HTTP + retries)."""
@@ -690,7 +823,7 @@ class FootballGoalsPlugin(PluginBase):
         return latest_goal(events, total)
 
     def _announce_goal(
-        self, fixture: Fixture, home: int, away: int, seq: int, stop_event: threading.Event
+        self, fixture: Fixture, home: int, away: int, seq: int, stop_event: threading.Event, side: str = ""
     ) -> None:
         """Fire the goal; fetch the scorer, retrying after 20 s and 60 s."""
         started = self._clock()
@@ -698,7 +831,7 @@ class FootballGoalsPlugin(PluginBase):
         goal = self._fetch_scorer(fixture.id, home + away)
         if not self._current(fixture.id, seq, stop_event):
             return
-        self._fire(fixture, home, away, goal, trigger_id, seq)
+        self._fire(fixture, home, away, goal, trigger_id, seq, side)
         for delay in SCORER_RETRY_DELAYS:
             if goal is not None:
                 return
@@ -708,42 +841,64 @@ class FootballGoalsPlugin(PluginBase):
                 return
             goal = self._fetch_scorer(fixture.id, home + away)
             if goal is not None and self._current(fixture.id, seq, stop_event):
-                self._fire(fixture, home, away, goal, trigger_id, seq)
+                self._fire(fixture, home, away, goal, trigger_id, seq, side)
 
     def _current(self, fixture_id: int, seq: int, stop_event: threading.Event) -> bool:
         with self._lock:
             return not stop_event.is_set() and self._goal_seq == seq
 
     def _goal_lines(
-        self, fixture: Fixture, home: int, away: int, goal: Optional[Dict[str, Any]]
+        self, fixture: Fixture, home: int, away: int, goal: Optional[Dict[str, Any]], side: str = ""
     ) -> Tuple[List[str], Dict[str, str]]:
         cols = self._board_cols
-        match = fit_match_line(fixture.home_label, fixture.away_label, home, away, cols)
-        lines = ["GOAL!", match]
-        scorer = minute = ""
+        team = fixture.home_label if side == "home" else fixture.away_label if side == "away" else ""
+        lines = [goal_header(team, cols), fit_match_line(fixture.home_label, fixture.away_label, home, away, cols)]
+        scorer = goal_minute = ""
         if goal is not None:
             scorer = board_text(goal.get("player_name"))
-            minute = board_text(goal.get("minute"))
-            line = fit_scorer_line(scorer, minute, goal_tag(goal.get("extra_info")), cols)
+            goal_minute = board_text(goal.get("minute"))
+            line = fit_scorer_line(scorer, goal_minute, goal_tag(goal.get("extra_info")), cols)
             if line:
                 lines.append(line)
-        data = self._variables(fixture, (home, away), scorer, minute)
+        with self._lock:
+            match = self._match
+            minute = self._display_minute(match) if match is not None and match["fixture"].id == fixture.id else ""
+        data = self._variables(fixture, (home, away), scorer, goal_minute, minute)
         return lines, data
 
     @staticmethod
     def _variables(
-        fixture: Optional[Fixture], score: Optional[Tuple[int, int]] = None, scorer: str = "", minute: str = ""
+        fixture: Optional[Fixture],
+        score: Optional[Tuple[int, int]] = None,
+        scorer: str = "",
+        goal_minute: str = "",
+        minute: str = "",
     ) -> Dict[str, str]:
-        """The six template variables, upper-case ASCII, each <= 22 chars."""
+        """The seven template variables, upper-case ASCII, each <= 22 chars."""
         values = {
             "home_team": board_text(fixture.home_label) if fixture is not None else "",
             "away_team": board_text(fixture.away_label) if fixture is not None else "",
             "home_goals": str(score[0]) if score is not None else "",
             "away_goals": str(score[1]) if score is not None else "",
-            "scorer": board_text(scorer),
             "minute": board_text(minute),
+            "scorer": board_text(scorer),
+            "goal_minute": board_text(goal_minute),
         }
         return {name: values[name][:MAX_VARIABLE_LENGTH] for name in VARIABLES}
+
+    @staticmethod
+    def _display_minute(match: Dict[str, Any]) -> str:
+        """``67'``, ``90'+3``, ``HT``, ``FT`` (or another final status as is)."""
+        status = str(match["status"] or match["fixture"].status or "").upper()
+        if status == "HT":
+            return "HT"
+        if status in FULL_TIME_STATUSES:
+            return "FT"
+        if status in FINISHED_STATUSES:
+            return board_text(status)
+        if match["finished_at"] is not None:
+            return "FT"  # ended by the team list or the LIVE_WINDOW cap
+        return format_minute(match["clock"])
 
     def _fire(
         self,
@@ -753,8 +908,9 @@ class FootballGoalsPlugin(PluginBase):
         goal: Optional[Dict[str, Any]],
         trigger_id: str,
         seq: Optional[int] = None,
+        side: str = "",
     ) -> None:
-        lines, data = self._goal_lines(fixture, home, away, goal)
+        lines, data = self._goal_lines(fixture, home, away, goal, side)
         trigger = TriggerResult(
             triggered=True,
             trigger_id=trigger_id,
@@ -769,13 +925,10 @@ class FootballGoalsPlugin(PluginBase):
                 if active.plugin_id == self.plugin_id and active.trigger_id != trigger_id:
                     service.dismiss_trigger(active.trigger_id)  # replaced, not suppressed
             self.fire_trigger(trigger)
-            self._last_goal = data
-            self._last_goal_match_line = lines[1]
-            self._last_goal_at = self._clock()
             match = self._match
             if (goal is not None and match is not None and seq is not None
                     and match["fixture"].id == fixture.id and match["goal_seq"] == seq):
-                match["scorer"], match["minute"] = data["scorer"], data["minute"]
+                match["scorer"], match["goal_minute"] = data["scorer"], data["goal_minute"]
         logger.info(
             "Goal trigger %s fired (%s)", trigger_id, "with scorer" if goal is not None else "scorer pending"
         )
@@ -799,14 +952,13 @@ class FootballGoalsPlugin(PluginBase):
             candidates = [f for f in self._upcoming.values() if f.kickoff is not None and f.kickoff > now]
         return min(candidates, key=lambda f: f.kickoff) if candidates else None
 
-    def _match_variables(self) -> Dict[str, str]:
-        """The variables for the team's match.
+    def _current_match(self) -> Tuple[Optional[Fixture], Optional[Dict[str, Any]]]:
+        """The team's match to show now, as ``(fixture, match)``.
 
-        During a match (from its first score push): live teams and score,
-        scorer/minute of the latest goal. After full time the final state is
-        kept for ``FINAL_STATE_HOLD_SECONDS``. A watched match that kicked off
-        but sent no push yet shows its teams only. Otherwise the next match's
-        teams, or all empty.
+        From its first score (push or live poll) until two hours after full
+        time: the fixture and a copy of the match record (with ``minute``).
+        A watched match that kicked off without any score yet: ``(fixture,
+        None)``. Otherwise ``(None, None)``.
         """
         now = self._now()
         with self._lock:
@@ -815,22 +967,41 @@ class FootballGoalsPlugin(PluginBase):
                 fixture = self._fixtures.get(match["fixture"].id, match["fixture"])
                 if (match["finished_at"] is None and fixture.kickoff is not None
                         and now - fixture.kickoff > LIVE_WINDOW):
-                    match["finished_at"] = self._clock()  # no full-time push seen
+                    self._finish(match)  # no full-time status seen
                 finished_at = match["finished_at"]
                 if finished_at is None or self._clock() - finished_at < FINAL_STATE_HOLD_SECONDS:
-                    return self._variables(fixture, match["score"], match["scorer"], match["minute"])
+                    return fixture, dict(match, minute=self._display_minute(match))
                 self._match = None
-            running = [
-                f for f in self._fixtures.values()
-                if f.kickoff is not None and f.kickoff <= now and f.status.upper() not in FINISHED_STATUSES
-            ]
-        if running:
-            return self._variables(max(running, key=lambda f: f.kickoff))
-        return self._variables(self._next_match())
+            return self._running(now), None
+
+    def _vs_line(self, fixture: Fixture) -> str:
+        """``BARCELONA - ALAVES``, cut to the board width."""
+        home, away = board_text(fixture.home_label), board_text(fixture.away_label)
+        line = f"{home} - {away}"
+        if len(line) > self._board_cols:
+            line = fit_match_line(home, away, 0, 0, self._board_cols).replace(" 0-0 ", " - ")
+        return line
+
+    def _live_page(self, fixture: Fixture, match: Optional[Dict[str, Any]]) -> PluginResult:
+        """``LIVE 67'`` (``HT``/``FT``) / ``MECHELEN 1-0 GENK`` / ``S. MICHEZ 22'``."""
+        if match is None:
+            lines = ["LIVE", self._vs_line(fixture)]
+            return PluginResult(available=True, data=self._variables(fixture), formatted_lines=self._pad(lines))
+        minute = match["minute"]
+        header = minute if minute == "HT" or match["finished_at"] is not None else f"LIVE {minute}".strip()
+        score = match["score"]
+        if score is None:
+            lines = [header, self._vs_line(fixture)]
+        else:
+            lines = [header, fit_match_line(fixture.home_label, fixture.away_label, score[0], score[1], self._board_cols)]
+        if match["scorer"]:
+            lines.append(fit_scorer_line(match["scorer"], match["goal_minute"], "", self._board_cols))
+        data = self._variables(fixture, score, match["scorer"], match["goal_minute"], minute)
+        return PluginResult(available=True, data=data, formatted_lines=self._pad(lines))
 
     def fetch_data(self) -> PluginResult:
-        """Board: the last goal (for two hours) or else the next match.
-        Variables: the team's match (see ``_match_variables``)."""
+        """Board and variables: the team's live match (and its final state
+        for two hours after full time), else the next match."""
         self._remember_board()
         if not sportapi.WEBSOCKETS_AVAILABLE:
             if not self._websockets_warned:
@@ -848,32 +1019,24 @@ class FootballGoalsPlugin(PluginBase):
                 return PluginResult(available=False, error="Enter one team (no commas)")
             return PluginResult(available=False, error="No team configured")
         self._ensure_listener()
-        data = self._match_variables()
 
-        with self._lock:
-            goal = self._last_goal
-            match_line = self._last_goal_match_line
-            fresh = goal is not None and self._clock() - self._last_goal_at < LAST_GOAL_HOLD_SECONDS
-        if fresh:
-            lines = ["GOAL!", match_line]
-            if goal["scorer"]:
-                lines.append(fit_scorer_line(goal["scorer"], goal["minute"], "", self._board_cols))
-            return PluginResult(available=True, data=data, formatted_lines=self._pad(lines))
+        current, match = self._current_match()
+        if current is not None:
+            return self._live_page(current, match)
 
         fixture = self._next_match()
+        data = self._variables(fixture)
         with self._lock:
             loaded = bool(self._team_refreshed_at)
         if fixture is None and not loaded:
             return PluginResult(available=True, data=data, formatted_lines=self._pad(["FOOTBALL GOALS", "LOADING MATCHES"]))
         if fixture is None:
             return PluginResult(available=True, data=data, formatted_lines=self._pad(["NO MATCH SCHEDULED"]))
-        home, away = board_text(fixture.home_label), board_text(fixture.away_label)
-        match = f"{home} - {away}"
-        if len(match) > self._board_cols:
-            match = fit_match_line(home, away, 0, 0, self._board_cols).replace(" 0-0 ", " - ")
         kickoff = fixture.kickoff.astimezone(SPORTAPI_TZ)
         when = board_text(kickoff.strftime("%a %d %b %H:%M"))
-        return PluginResult(available=True, data=data, formatted_lines=self._pad(["NEXT MATCH", match, when]))
+        return PluginResult(
+            available=True, data=data, formatted_lines=self._pad(["NEXT MATCH", self._vs_line(fixture), when])
+        )
 
 
 Plugin = FootballGoalsPlugin

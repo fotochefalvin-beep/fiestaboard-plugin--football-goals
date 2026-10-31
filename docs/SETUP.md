@@ -66,11 +66,13 @@ again, and change templates to `{{football_goals.*}}`.
 
 `{{football_goals.home_team}}`, `{{football_goals.away_team}}`,
 `{{football_goals.home_goals}}`, `{{football_goals.away_goals}}`,
-`{{football_goals.minute}}`, `{{football_goals.scorer}}`,
-`{{football_goals.goal_minute}}`: before kick-off the next match's teams;
-during the match the live goals per team, the live match minute (`67'`,
-`HT`, `FT`) and the latest goal's scorer and minute (empty until
-sportapi.ai lists the goal); after full time the final state for two hours.
+`{{football_goals.minute}}`, `{{football_goals.scoring_team}}`,
+`{{football_goals.scorer}}`, `{{football_goals.goal_minute}}`: before
+kick-off the next match's teams; during the match the live goals per team,
+the live match minute (`67'`, `HT`, `FT`), the team of the latest goal, and
+that goal's scorer and minute (empty until sportapi.ai lists the goal); after
+full time the final state for two hours. A trigger page can show
+`GOAL! {{football_goals.scoring_team}}`.
 See the README for details.
 
 **Upgrading from 0.3.x?** `minute` is now the live match minute; the latest

@@ -27,9 +27,9 @@ Announces goals in matches of the one team you follow, pushed by sportapi.ai:
   ``MECHELEN 1-0 GENK`` / ``S. MICHEZ 22'``), ``FT`` for two hours after full
   time, else ``NEXT MATCH``.
 * The template variables (``home_team``, ``away_team``, ``home_goals``,
-  ``away_goals``, ``minute``, ``scorer``, ``goal_minute``) follow the team's
+  ``away_goals``, ``minute``, ``scoring_team``, ``scorer``, ``goal_minute``) follow the team's
   match: the next match's teams before kick-off, the live score and minute
-  during it (scorer/goal_minute = latest goal), the final state for two hours
+  during it (scoring_team/scorer/goal_minute = latest goal), the final state for two hours
   after full time.
 
 Request economy: team lookups at most once per hour per team (normally every
@@ -69,7 +69,7 @@ DEFAULT_ROWS = 6
 MAX_VARIABLE_LENGTH = 22
 DEFAULT_TRIGGER_DURATION = 60
 MIN_TRIGGER_DURATION = 10
-VARIABLES = ("home_team", "away_team", "home_goals", "away_goals", "minute", "scorer", "goal_minute")
+VARIABLES = ("home_team", "away_team", "home_goals", "away_goals", "minute", "scoring_team", "scorer", "goal_minute")
 
 # Team lookups: the spec allows at most one per hour per team; every 3 hours
 # (plus once when the day changes) keeps a match day well under 50 requests.
@@ -764,10 +764,11 @@ class FootballGoalsPlugin(PluginBase):
             self._goal_seq += 1
             seq = self._goal_seq
             match["goal_seq"] = seq
+            # The side whose goals went up (both at once: name no team).
+            home_up, away_up = home > previous[0], away > previous[1]
+            side = "home" if home_up and not away_up else "away" if away_up and not home_up else ""
+            match["scoring_team"] = self._side_label(fixture, side)
             stop_event = self._stop_event
-        # The side whose goals went up (both at once: name no team).
-        home_up, away_up = home > previous[0], away > previous[1]
-        side = "home" if home_up and not away_up else "away" if away_up and not home_up else ""
         self._spawn(self._announce_goal, fixture, home, away, seq, stop_event, side)
 
     def _track_match(
@@ -776,13 +777,14 @@ class FootballGoalsPlugin(PluginBase):
         """Follow the team's match (lock held): live score, status, clock.
 
         Every push counts, a decrease too. When the score changes, the latest
-        goal's scorer/goal_minute are cleared until ``/events`` names the goal
-        that led to the new score.
+        goal's scoring_team/scorer/goal_minute are cleared until the goal push
+        (scoring_team) and ``/events`` (scorer) name the goal that led to the
+        new score.
         """
         match = self._match
         if match is None or match["fixture"].id != fixture.id:
-            match = {"fixture": fixture, "score": None, "status": "", "clock": None, "scorer": "",
-                     "goal_minute": "", "goal_seq": None, "pushed_at": None, "finished_at": None}
+            match = {"fixture": fixture, "score": None, "status": "", "clock": None, "scoring_team": "",
+                     "scorer": "", "goal_minute": "", "goal_seq": None, "pushed_at": None, "finished_at": None}
             self._match = match
         match["fixture"] = fixture
         if status:
@@ -791,7 +793,7 @@ class FootballGoalsPlugin(PluginBase):
             match["clock"] = clock
         if score is not None and match["score"] != score:
             match["score"] = score
-            match["scorer"] = match["goal_minute"] = ""
+            match["scoring_team"] = match["scorer"] = match["goal_minute"] = ""
             match["goal_seq"] = None
         if (match["status"] or fixture.status).upper() in FINISHED_STATUSES:
             self._finish(match)
@@ -851,7 +853,7 @@ class FootballGoalsPlugin(PluginBase):
         self, fixture: Fixture, home: int, away: int, goal: Optional[Dict[str, Any]], side: str = ""
     ) -> Tuple[List[str], Dict[str, str]]:
         cols = self._board_cols
-        team = fixture.home_label if side == "home" else fixture.away_label if side == "away" else ""
+        team = self._side_label(fixture, side)
         lines = [goal_header(team, cols), fit_match_line(fixture.home_label, fixture.away_label, home, away, cols)]
         scorer = goal_minute = ""
         if goal is not None:
@@ -863,7 +865,7 @@ class FootballGoalsPlugin(PluginBase):
         with self._lock:
             match = self._match
             minute = self._display_minute(match) if match is not None and match["fixture"].id == fixture.id else ""
-        data = self._variables(fixture, (home, away), scorer, goal_minute, minute)
+        data = self._variables(fixture, (home, away), scorer, goal_minute, minute, team)
         return lines, data
 
     @staticmethod
@@ -873,18 +875,25 @@ class FootballGoalsPlugin(PluginBase):
         scorer: str = "",
         goal_minute: str = "",
         minute: str = "",
+        scoring_team: str = "",
     ) -> Dict[str, str]:
-        """The seven template variables, upper-case ASCII, each <= 22 chars."""
+        """The eight template variables, upper-case ASCII, each <= 22 chars."""
         values = {
             "home_team": board_text(fixture.home_label) if fixture is not None else "",
             "away_team": board_text(fixture.away_label) if fixture is not None else "",
             "home_goals": str(score[0]) if score is not None else "",
             "away_goals": str(score[1]) if score is not None else "",
             "minute": board_text(minute),
+            "scoring_team": board_text(scoring_team),
             "scorer": board_text(scorer),
             "goal_minute": board_text(goal_minute),
         }
         return {name: values[name][:MAX_VARIABLE_LENGTH] for name in VARIABLES}
+
+    @staticmethod
+    def _side_label(fixture: Fixture, side: str) -> str:
+        """The scoring team's label for *side* (``home``/``away``), else ``""``."""
+        return fixture.home_label if side == "home" else fixture.away_label if side == "away" else ""
 
     @staticmethod
     def _display_minute(match: Dict[str, Any]) -> str:
@@ -996,7 +1005,9 @@ class FootballGoalsPlugin(PluginBase):
             lines = [header, fit_match_line(fixture.home_label, fixture.away_label, score[0], score[1], self._board_cols)]
         if match["scorer"]:
             lines.append(fit_scorer_line(match["scorer"], match["goal_minute"], "", self._board_cols))
-        data = self._variables(fixture, score, match["scorer"], match["goal_minute"], minute)
+        data = self._variables(
+            fixture, score, match["scorer"], match["goal_minute"], minute, match["scoring_team"]
+        )
         return PluginResult(available=True, data=data, formatted_lines=self._pad(lines))
 
     def fetch_data(self) -> PluginResult:

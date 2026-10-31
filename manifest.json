@@ -1,7 +1,7 @@
 {
   "id": "football_goals",
   "name": "Football Goal Notifier",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Follow your football team live on the board (LIVE 67' / MECHELEN 1-0 GENK) and announce every goal with the team, scorer and minute (GOAL! MECHELEN / S. MICHEZ 22'), pushed by sportapi.ai.",
   "author": "Alvin To",
   "icon": "trophy",
@@ -84,6 +84,13 @@
         "group": "match",
         "example": "67'"
       },
+      "scoring_team": {
+        "description": "Team of the latest goal in that match (empty before the first goal, when both teams scored in one update, and after a disallowed goal)",
+        "type": "string",
+        "max_length": 22,
+        "group": "match",
+        "example": "MECHELEN"
+      },
       "scorer": {
         "description": "Scorer of the latest goal in that match (empty until sportapi.ai lists it)",
         "type": "string",
@@ -106,6 +113,7 @@
     "home_goals": 22,
     "away_goals": 22,
     "minute": 22,
+    "scoring_team": 22,
     "scorer": 22,
     "goal_minute": 22
   }

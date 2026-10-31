@@ -50,7 +50,7 @@ def test_running_match_without_goal_is_a_live_page(make_plugin, session, trigger
     assert result.formatted_lines[:3] == ["LIVE 12'", "MECHELEN 0-0 GENK", ""]
     assert result.data == {
         "home_team": "MECHELEN", "away_team": "GENK", "home_goals": "0", "away_goals": "0",
-        "minute": "12'", "scorer": "", "goal_minute": "",
+        "minute": "12'", "scoring_team": "", "scorer": "", "goal_minute": "",
     }
     assert plugin_triggers(trigger_service) == []
     assert polls(session) == 1  # the live poll also brought the short names
@@ -203,7 +203,7 @@ def test_before_kick_off_next_match_and_no_live_poll(make_plugin, session, clock
     result = plugin.fetch_data()
     assert result.formatted_lines[:3] == ["NEXT MATCH", "BARCELONA - ALAVES", "SAT 31 OCT 21:00"]
     assert {k: v for k, v in result.data.items() if k not in ("home_team", "away_team")} == {
-        "home_goals": "", "away_goals": "", "minute": "", "scorer": "", "goal_minute": "",
+        "home_goals": "", "away_goals": "", "minute": "", "scoring_team": "", "scorer": "", "goal_minute": "",
     }
 
 
@@ -316,3 +316,60 @@ def test_other_final_status_is_shown_as_is(live_plugin):
     plugin = live_plugin()
     plugin.handle_score_update(score(MECHELEN_GENK, 0, 0, status="ABANDONED"))
     assert page(plugin, 1) == ["ABANDONED"]
+
+
+# ── scoring_team ─────────────────────────────────────────────────────────────
+
+
+def test_scoring_team_is_set_by_the_goal_push_before_the_scorer_is_known(live_plugin, session, trigger_service):
+    session.routes[EVENTS] = FakeResponse(200, events_body(MECHELEN_GENK, []))
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    [trigger] = plugin_triggers(trigger_service)
+    assert (trigger.data["scoring_team"], trigger.data["scorer"]) == ("MECHELEN", "")
+    assert plugin.fetch_data().data["scoring_team"] == "MECHELEN"
+
+
+def test_scoring_team_names_the_other_team_for_a_goal_against(live_plugin, session, trigger_service):
+    session.routes[EVENTS] = FakeResponse(
+        200, events_body(MECHELEN_GENK, [goal_event("S. Michez", "22'"), goal_event("T. Hrosovsky", "67'", "away")])
+    )
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 1))
+    [trigger] = plugin_triggers(trigger_service)
+    assert trigger.data["scoring_team"] == "GENK"
+    assert plugin.fetch_data().data["scoring_team"] == "GENK"
+
+
+def test_scoring_team_empty_before_first_goal_and_when_both_sides_score(live_plugin, session, trigger_service):
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    assert plugin.fetch_data().data["scoring_team"] == ""
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 1))
+    [trigger] = plugin_triggers(trigger_service)
+    assert trigger.data["scoring_team"] == ""
+    assert plugin.fetch_data().data["scoring_team"] == ""
+
+
+def test_scoring_team_cleared_by_a_disallowed_goal_and_not_set_by_rest(live_plugin, session, clock, now_holder):
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    assert plugin.fetch_data().data["scoring_team"] == "MECHELEN"
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))  # disallowed
+    assert plugin.fetch_data().data["scoring_team"] == ""
+    session.routes[DETAILS] = FakeResponse(200, live_details(MECHELEN_GENK, 0, 1, minute="70'"))
+    tick(plugin, clock, now_holder, 200)  # REST score moves, no push
+    data = plugin.fetch_data().data
+    assert (data["away_goals"], data["scoring_team"]) == ("1", "")
+
+
+def test_scoring_team_kept_after_full_time(live_plugin, session):
+    plugin = live_plugin()
+    plugin.handle_score_update(score(MECHELEN_GENK, 0, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0))
+    plugin.handle_score_update(score(MECHELEN_GENK, 1, 0, status="FT", minute=None))
+    data = plugin.fetch_data().data
+    assert (data["minute"], data["scoring_team"]) == ("FT", "MECHELEN")

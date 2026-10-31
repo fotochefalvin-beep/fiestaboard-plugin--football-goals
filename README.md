@@ -88,13 +88,18 @@ team's match, so a template can lay the pieces out freely:
 | `{{football_goals.home_goals}}` | `1` | Home team's live goals: follow every score push, also a disallowed goal going back down |
 | `{{football_goals.away_goals}}` | `0` | Away team's live goals, the same way |
 | `{{football_goals.minute}}` | `67'` | Live match minute: `67'`, `90'+3`, `HT`, `FT` |
+| `{{football_goals.scoring_team}}` | `MECHELEN` | Team of the latest goal |
 | `{{football_goals.scorer}}` | `S. MICHEZ` | Scorer of the latest goal |
 | `{{football_goals.goal_minute}}` | `22'` | Minute of the latest goal |
 
 - **Before kick-off:** `home_team`/`away_team` are the next match, the rest
   is empty (all empty when no match is known).
 - **During the match:** the live teams, goals and minute (`minute` is
-  refreshed once a minute; `HT` at half time). `scorer`/`goal_minute` are
+  refreshed once a minute; `HT` at half time). `scoring_team` is set as
+  soon as the goal is pushed; empty before the first goal, when one update
+  raises both teams' goals, after a disallowed goal, and for goals scored
+  before the plugin (re)started, until the next goal. For an own goal it is
+  the team the goal counts for. `scorer`/`goal_minute` are
   empty until sportapi.ai lists the latest goal in `/events` (checked right
   away, then after 20 s and 60 s), and empty before the first goal.
 - **After full time:** the final state (`minute` = `FT`) stays for two
@@ -109,7 +114,8 @@ team's match, so a template can lay the pieces out freely:
 | Otherwise | `NEXT MATCH` | `MECHELEN - GENK` | `SAT 31 OCT 16:00` |
 
 A running match always wins over the next one. Set the plugin's *trigger
-page* to render a goal with your own template.
+page* to render a goal with your own template, e.g.
+`GOAL! {{football_goals.scoring_team}}` on line 1.
 
 ### Upgrading
 

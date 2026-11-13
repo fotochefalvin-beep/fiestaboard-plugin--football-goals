@@ -387,3 +387,105 @@ def test_key_is_url_encoded_in_ws_url():
 
     listener = sportapi.ScoreListener("a+b/c&d=e", wanted=lambda: [], on_update=lambda m: None)
     assert listener._url.endswith("?key=a%2Bb%2Fc%26d%3De")
+
+
+# ── 0.4.3: connection errors ─────────────────────────────────────────────────
+
+
+def _raising(exc):
+    def route():
+        raise exc
+
+    return route
+
+
+def test_dropped_connection_is_retried_once_at_once():
+    import requests
+
+    from plugins.football_goals import sportapi
+
+    ok = FakeResponse(200, {"success": True, "team": {"slug": "mechelen"}})
+    answers = [_raising(requests.ConnectionError("Connection aborted, RemoteDisconnected")), lambda: ok]
+    session = FakeSession({"/teams/slug/mechelen": lambda: answers.pop(0)()})
+    client = sportapi.SportApiClient(TEST_KEY, session=session)
+    assert client.team("mechelen")["team"]["slug"] == "mechelen"
+    assert client.request_count == 2
+    assert session.paths() == ["/teams/slug/mechelen"] * 2
+
+
+def test_two_connection_errors_raise_network_error():
+    import requests
+
+    from plugins.football_goals import sportapi
+
+    session = FakeSession({"/teams/slug/mechelen": _raising(requests.ConnectionError("refused"))})
+    client = sportapi.SportApiClient(TEST_KEY, session=session)
+    with pytest.raises(sportapi.NetworkError) as err:
+        client.team("mechelen")
+    assert str(err.value) == "GET /teams/slug/mechelen failed: ConnectionError: refused"
+    assert client.request_count == 2
+
+
+@pytest.mark.parametrize("exc_name", ["Timeout", "ConnectTimeout", "TooManyRedirects"])
+def test_timeouts_and_other_request_errors_are_not_retried(exc_name):
+    import requests
+
+    from plugins.football_goals import sportapi
+
+    session = FakeSession({"/teams/slug/mechelen": _raising(getattr(requests, exc_name)("slow"))})
+    client = sportapi.SportApiClient(TEST_KEY, session=session)
+    with pytest.raises(sportapi.NetworkError):
+        client.team("mechelen")
+    assert client.request_count == 1
+
+
+def test_http_errors_are_not_retried():
+    from plugins.football_goals import sportapi
+
+    session = FakeSession({"/teams/slug/mechelen": FakeResponse(500, {})})
+    client = sportapi.SportApiClient(TEST_KEY, session=session)
+    with pytest.raises(sportapi.ApiError) as err:
+        client.team("mechelen")
+    assert not isinstance(err.value, sportapi.NetworkError)
+    assert client.request_count == 1
+
+
+def test_network_error_detail_is_redacted_and_cut():
+    import requests
+
+    from plugins.football_goals import sportapi
+
+    long = f"key {TEST_KEY} " + "x" * 500
+    session = FakeSession({"/teams/slug/mechelen": _raising(requests.ConnectionError(long))})
+    client = sportapi.SportApiClient(TEST_KEY, session=session)
+    with pytest.raises(sportapi.NetworkError) as err:
+        client.team("mechelen")
+    text = str(err.value)
+    assert TEST_KEY not in text
+    assert "ConnectionError: key ***" in text
+    assert text.endswith("...")
+    assert len(text) <= len("GET /teams/slug/mechelen failed: ") + sportapi.NETWORK_DETAIL_CHARS
+
+
+def test_own_session_is_renewed_after_a_dropped_connection(monkeypatch):
+    import requests
+
+    from plugins.football_goals import sportapi
+
+    class Stale:
+        closed = False
+
+        def get(self, url, headers=None, timeout=None):
+            raise requests.ConnectionError("stale")
+
+        def close(self):
+            self.closed = True
+
+    fresh = FakeSession({"/teams/slug/mechelen": FakeResponse(200, {"team": {}})})
+    client = sportapi.SportApiClient(TEST_KEY)
+    stale = Stale()
+    client._session = stale
+    monkeypatch.setattr(sportapi.requests, "Session", lambda: fresh)
+    assert client.team("mechelen") == {"team": {}}
+    assert stale.closed and client._session is fresh
+    assert fresh.paths() == ["/teams/slug/mechelen"]

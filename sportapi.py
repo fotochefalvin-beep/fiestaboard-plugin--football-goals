@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 API_BASE = "https://sportapi.ai/api"
 WS_URL = "wss://sportapi.ai/ws"
 HTTP_TIMEOUT_SECONDS = 8
+# Longest network-error detail kept in an exception message (and the log).
+NETWORK_DETAIL_CHARS = 200
 # Retry-After fallback when a 429 carries none.
 DEFAULT_RETRY_AFTER_SECONDS = 300
 
@@ -85,6 +87,11 @@ class NotFoundError(ApiError):
     """404: e.g. a team slug the API does not know."""
 
 
+class NetworkError(ApiError):
+    """No HTTP response arrived (connection refused or dropped, DNS, timeout):
+    the request never reached sportapi.ai."""
+
+
 class RateLimitedError(ApiError):
     """429, or a call skipped because an earlier 429 is still in force."""
 
@@ -117,6 +124,8 @@ class SportApiClient:
         base_url: str = API_BASE,
     ):
         self._api_key = api_key
+        # Only a session made here is replaced after a dropped connection.
+        self._own_session = session is None
         self._session = session if session is not None else requests.Session()
         self._clock = clock
         self._base_url = base_url.rstrip("/")
@@ -124,20 +133,51 @@ class SportApiClient:
         self._lock = threading.Lock()
         self.request_count = 0
 
-    def _get(self, path: str) -> dict[str, Any]:
+    def _send(self, path: str) -> Any:
         with self._lock:
             remaining = self._blocked_until - self._clock()
             if remaining > 0:
                 raise RateLimitedError(f"rate limited for another {remaining:.0f} s", remaining)
             self.request_count += 1
+            session = self._session
+        return session.get(
+            self._base_url + path,
+            headers={"X-Api-Key": self._api_key, "Accept": "application/json"},
+            timeout=HTTP_TIMEOUT_SECONDS,
+        )
+
+    def _network_error(self, path: str, exc: Exception) -> NetworkError:
+        detail = redact(f"{type(exc).__name__}: {exc}", self._api_key)
+        if len(detail) > NETWORK_DETAIL_CHARS:
+            detail = detail[: NETWORK_DETAIL_CHARS - 3] + "..."
+        return NetworkError(f"GET {path} failed: {detail}")
+
+    def _renew_session(self) -> None:
+        """Drop pooled connections the server may have closed long ago."""
+        if not self._own_session:
+            return
+        with self._lock:
+            old, self._session = self._session, requests.Session()
         try:
-            response = self._session.get(
-                self._base_url + path,
-                headers={"X-Api-Key": self._api_key, "Accept": "application/json"},
-                timeout=HTTP_TIMEOUT_SECONDS,
-            )
+            old.close()
+        except Exception:  # pragma: no cover - closing is best effort
+            pass
+
+    def _get(self, path: str) -> dict[str, Any]:
+        try:
+            response = self._send(path)
+        except requests.Timeout as exc:  # includes ConnectTimeout: not retried
+            raise self._network_error(path, exc) from None
+        except requests.ConnectionError:
+            # Often a pooled keep-alive connection that was closed while idle:
+            # once more, straight away, on a fresh connection.
+            self._renew_session()
+            try:
+                response = self._send(path)
+            except requests.RequestException as exc:
+                raise self._network_error(path, exc) from None
         except requests.RequestException as exc:
-            raise ApiError(f"GET {path} failed: {redact(type(exc).__name__, self._api_key)}") from None
+            raise self._network_error(path, exc) from None
 
         status = response.status_code
         if status == 429:

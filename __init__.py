@@ -75,6 +75,9 @@ VARIABLES = ("home_team", "away_team", "home_goals", "away_goals", "minute", "sc
 # (plus once when the day changes) keeps a match day well under 50 requests.
 MIN_TEAM_REFRESH_SECONDS = 3600
 TEAM_REFRESH_SECONDS = 3 * 3600
+# After a network error (the request never reached sportapi.ai, so it costs no
+# quota) a team lookup or live check is tried again this soon.
+NETWORK_RETRY_SECONDS = 300
 # Scorer retries, measured from the moment the goal was seen.
 SCORER_RETRY_DELAYS = (20, 60)
 # A fixture that kicked off this long ago is still "today's" (late kick-offs
@@ -295,6 +298,9 @@ class FootballGoalsPlugin(PluginBase):
         self._team_refreshed_at: Dict[str, float] = {}
         self._team_refreshed_day: Dict[str, date] = {}
         self._unresolved: set = set()
+        # Slug as typed -> why its last lookup failed ("network", "error",
+        # "unknown"); cleared by a successful lookup.
+        self._failed: Dict[str, str] = {}
         # Slug as typed -> the API's canonical slug for that team.
         self._canonical: Dict[str, str] = {}
         # Slug as typed -> sportapi.ai team id (to spot live matches by date).
@@ -406,6 +412,10 @@ class FootballGoalsPlugin(PluginBase):
                     for slug in [slug for slug in mapping if slug not in keep]:
                         del mapping[slug]
                 self._unresolved &= keep
+                for slug in [slug for slug in self._failed if slug not in keep]:
+                    del self._failed[slug]
+                # Saving is a user action: retry a team whose lookup failed.
+                self._clear_failed_waits()
                 # Rebuilt from the kept team lists; running matches come back
                 # through the live check.
                 self._fixtures, self._upcoming, self._live_fixtures = {}, {}, {}
@@ -414,8 +424,19 @@ class FootballGoalsPlugin(PluginBase):
             self._ensure_listener()
 
     def cleanup(self) -> None:
-        """Close the WebSocket and stop the listener thread."""
+        """Close the WebSocket and stop the listener thread (the host calls
+        this on disable, so re-enabling retries a failed team lookup)."""
         self._stop_listener()
+        with self._lock:
+            self._clear_failed_waits()
+
+    def _clear_failed_waits(self) -> None:
+        """Make teams whose last lookup failed due now (lock held). Teams
+        whose last lookup succeeded keep their timestamps, so no successful
+        lookup is re-spent."""
+        for slug in self._failed:
+            self._team_refreshed_at.pop(slug, None)
+            self._team_refreshed_day.pop(slug, None)
 
     def _stop_listener(self) -> None:
         with self._lock:
@@ -497,15 +518,24 @@ class FootballGoalsPlugin(PluginBase):
             except sportapi.NotFoundError:
                 with self._lock:
                     self._unresolved.add(slug)
+                    self._failed[slug] = "unknown"
                 logger.warning("sportapi.ai does not know the team '%s'", slug)
+                continue
+            except sportapi.NetworkError as exc:
+                logger.warning("Fixture lookup for '%s' failed: %s", slug, exc)
+                with self._lock:  # never reached the API: due again in 5 min
+                    self._failed[slug] = "network"
+                    self._team_refreshed_at[slug] = now - (TEAM_REFRESH_SECONDS - NETWORK_RETRY_SECONDS)
                 continue
             except sportapi.ApiError as exc:
                 logger.warning("Fixture lookup for '%s' failed: %s", slug, exc)
                 with self._lock:  # due again after MIN_TEAM_REFRESH_SECONDS, not 3 h
+                    self._failed[slug] = "error"
                     self._team_refreshed_at[slug] = now - (TEAM_REFRESH_SECONDS - MIN_TEAM_REFRESH_SECONDS)
                 continue
             with self._lock:
                 self._unresolved.discard(slug)
+                self._failed.pop(slug, None)
                 team = body.get("team") if isinstance(body.get("team"), dict) else {}
                 self._canonical[slug] = str(team.get("slug") or slug)
                 if isinstance(team.get("id"), int):
@@ -533,9 +563,10 @@ class FootballGoalsPlugin(PluginBase):
             items = client.fixtures_on(today.isoformat())
         except sportapi.ApiError as exc:
             logger.warning("Live fixture check failed: %s", exc)
-            with self._lock:  # retry, but at most once per MIN_TEAM_REFRESH_SECONDS
+            network = isinstance(exc, sportapi.NetworkError)
+            with self._lock:  # retry: after 5 min (network) or 1 h (API error)
                 self._live_checked = False
-                self._live_retry_at = self._clock() + MIN_TEAM_REFRESH_SECONDS
+                self._live_retry_at = self._clock() + (NETWORK_RETRY_SECONDS if network else MIN_TEAM_REFRESH_SECONDS)
             return
         found: Dict[int, Fixture] = {}
         for item in items:
@@ -1010,6 +1041,12 @@ class FootballGoalsPlugin(PluginBase):
         )
         return PluginResult(available=True, data=data, formatted_lines=self._pad(lines))
 
+    def _failure_lines(self, slug: str, failure: str) -> List[str]:
+        """The board while the team has never loaded and its lookup failed."""
+        if failure == "unknown":
+            return ["UNKNOWN TEAM", board_text(slug)[: self._board_cols]]
+        return ["FOOTBALL GOALS", "NO CONNECTION" if failure == "network" else "LOOKUP FAILED"]
+
     def fetch_data(self) -> PluginResult:
         """Board and variables: the team's live match (and its final state
         for two hours after full time), else the next match."""
@@ -1037,8 +1074,12 @@ class FootballGoalsPlugin(PluginBase):
 
         fixture = self._next_match()
         data = self._variables(fixture)
+        slug = self._teams()[0]
         with self._lock:
             loaded = bool(self._team_refreshed_at)
+            failure = self._failed.get(slug) if slug not in self._team_fixtures else None
+        if fixture is None and failure is not None:
+            return PluginResult(available=True, data=data, formatted_lines=self._pad(self._failure_lines(slug, failure)))
         if fixture is None and not loaded:
             return PluginResult(available=True, data=data, formatted_lines=self._pad(["FOOTBALL GOALS", "LOADING MATCHES"]))
         if fixture is None:

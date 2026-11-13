@@ -112,12 +112,22 @@ team's match, so a template can lay the pieces out freely:
 | Match running | `LIVE 67'` (`HT` at half time) | `MECHELEN 1-0 GENK` | latest goal `S. MICHEZ 22'` (empty before the first goal or until `/events` lists it) |
 | Two hours after full time | `FT` | `MECHELEN 2-1 GENK` | latest goal |
 | Otherwise | `NEXT MATCH` | `MECHELEN - GENK` | `SAT 31 OCT 16:00` |
+| Team never loaded, network error | `FOOTBALL GOALS` | `NO CONNECTION` | |
+| Team never loaded, other API error | `FOOTBALL GOALS` | `LOOKUP FAILED` | |
+| Team slug unknown | `UNKNOWN TEAM` | the slug | |
 
 A running match always wins over the next one. Set the plugin's *trigger
 page* to render a goal with your own template, e.g.
 `GOAL! {{football_goals.scoring_team}}` on line 1.
 
 ### Upgrading
+
+0.4.3 recovers from network errors on the team lookup: a dropped connection
+is retried once at once, a network error is retried after 5 minutes (it never
+reached sportapi.ai, so it costs no quota) instead of an hour, and saving the
+settings or re-enabling the plugin retries a failed lookup straight away. The
+board shows `NO CONNECTION`, `LOOKUP FAILED` or `UNKNOWN TEAM` instead of an
+empty page, and the log names the cause.
 
 0.4.2 asks FiestaBoard to read the plugin on every render (`live_data`)
 instead of keeping its result for 5 minutes, so the live page shows the new

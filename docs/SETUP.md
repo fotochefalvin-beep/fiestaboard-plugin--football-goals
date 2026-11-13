@@ -104,6 +104,14 @@ During a match of your team, follow FiestaBoard's log:
 docker compose logs -f | grep -i football
 ```
 
+If that shows nothing: some FiestaBoard images send only the process
+supervisor to `docker logs` and write the app log to a file inside the
+container. Read that instead (container name from `docker ps`):
+
+```bash
+docker exec fiestaboard-fiestaboard-1 sh -c 'grep -iE "football|sportapi" /app/data/logs/app.log | tail -40'
+```
+
 **Copy as-is.** You should see `Football Goals listener started`, and after a
 goal `Goal trigger football_goals_<fixture>_<home>_<away> fired (with
 scorer)`. The key never appears in the log.
@@ -115,5 +123,8 @@ scorer)`. The key never appears in the log.
 | `sportapi.ai WebSocket rejected the API key` | Wrong or revoked key; paste it again. The plugin retries with backoff (5 s up to 5 min). |
 | `quota hit (HTTP 429)` | Daily/monthly limit reached; goals still show, without the scorer, until the limit resets (00:00 UTC). |
 | `WEBSOCKETS PACKAGE NOT INSTALLED` on the board | The FiestaBoard image lacks `websockets`; use the official image (it ships with it). |
+| `NO CONNECTION` on the board / `Fixture lookup ... failed: ConnectionError: ...` | The Pi could not reach sportapi.ai. Retried after 5 minutes; saving the settings or re-enabling the plugin retries at once. |
+| `LOOKUP FAILED` on the board | sportapi.ai answered with an error (e.g. HTTP 500). Retried after an hour; saving the settings or re-enabling the plugin retries at once. |
+| `UNKNOWN TEAM` on the board | The slug is wrong; see step 2. |
 | No goal for a match | Only matches of the configured team, played today, are watched. |
 | `Live minute for ... unavailable` | The once-a-minute minute lookup failed; the board keeps the last minute and tries again a minute later (after a `429`, once `Retry-After` has passed). |

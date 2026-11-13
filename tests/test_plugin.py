@@ -911,3 +911,124 @@ def test_acceptance_barcelona_goal_fills_all_five_variables(live_plugin, session
     assert plugin.fetch_data().data == {
         "home_team": "BARCELONA", "away_team": "ALAVES", "home_goals": "1", "away_goals": "0", "minute": "30'", "scoring_team": "BARCELONA", "scorer": "R. LEWANDOWSKI", "goal_minute": "3'",
     }
+
+
+# ── 0.4.3: recover from connection errors ────────────────────────────────────
+
+
+def _down(session, path="/teams/slug/mechelen"):
+    """Route *path* to a connection error until the returned ``up()`` runs."""
+    import requests
+
+    working = session.routes[path]
+
+    def fail():
+        raise requests.ConnectionError("Connection aborted, RemoteDisconnected")
+
+    session.routes[path] = fail
+
+    def up():
+        session.routes[path] = working
+
+    return up
+
+
+def test_network_error_retries_team_after_five_minutes(make_plugin, session, clock):
+    up = _down(session)
+    plugin = make_plugin()
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/mechelen") == 2  # one immediate retry
+    up()
+    clock.advance(299)
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/mechelen") == 2
+    clock.advance(1)
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/mechelen") == 3
+    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
+
+
+def test_saving_settings_retries_failed_team_at_once(make_plugin, session):
+    up = _down(session)
+    plugin = make_plugin()
+    plugin.refresh_fixtures()
+    up()
+    plugin.config = dict(plugin.config, trigger_duration_seconds=90)  # same team
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/mechelen") == 3
+    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
+    plugin.config = dict(plugin.config, trigger_duration_seconds=120)  # loaded: no re-spend
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/mechelen") == 3
+
+
+def test_reenabling_retries_failed_team_at_once(make_plugin, session):
+    session.routes["/teams/slug/mechelen"] = [FakeResponse(500, {}), session.routes["/teams/slug/mechelen"]]
+    plugin = make_plugin()
+    plugin.refresh_fixtures()
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/mechelen") == 1  # API error: 1 h wait
+    plugin.enabled = False
+    plugin.enabled = True
+    plugin.refresh_fixtures()
+    assert session.paths().count("/teams/slug/mechelen") == 2
+    assert plugin.wanted_fixture_ids() == [MECHELEN_GENK]
+
+
+def test_board_shows_why_the_team_never_loaded(make_plugin, session):
+    working = session.routes["/teams/slug/mechelen"]
+    _down(session)
+    plugin = make_plugin()
+    plugin.refresh_fixtures()
+    assert plugin.fetch_data().formatted_lines[:2] == ["FOOTBALL GOALS", "NO CONNECTION"]
+
+    session.routes["/teams/slug/mechelen"] = FakeResponse(500, {})
+    plugin.config = dict(plugin.config, trigger_duration_seconds=90)
+    plugin.refresh_fixtures()
+    assert plugin.fetch_data().formatted_lines[:2] == ["FOOTBALL GOALS", "LOOKUP FAILED"]
+
+    session.routes["/teams/slug/mechelen"] = working
+    plugin.config = dict(plugin.config, trigger_duration_seconds=100)
+    plugin.refresh_fixtures()
+    result = plugin.fetch_data()
+    assert result.formatted_lines[0] != "FOOTBALL GOALS"
+    assert result.data["home_team"] == "MECHELEN"
+
+
+def test_board_shows_unknown_team(make_plugin):
+    plugin = make_plugin({"team": "kv nowhere at all in belgium"})
+    plugin.refresh_fixtures()
+    lines = plugin.fetch_data().formatted_lines
+    assert lines[0] == "UNKNOWN TEAM"
+    assert lines[1] == "KV-NOWHERE-AT-ALL-IN-BELGIUM"[: plugin._board_cols]
+
+
+def test_later_failure_keeps_last_known_match(make_plugin, session, clock):
+    plugin = make_plugin({"team": "barcelona"})
+    plugin.refresh_fixtures()
+    before = plugin.fetch_data().formatted_lines
+    _down(session, "/teams/slug/barcelona")
+    clock.advance(3 * 3600)
+    plugin.refresh_fixtures()
+    assert plugin.fetch_data().formatted_lines == before
+
+
+def test_network_failure_is_logged_with_cause_without_key(make_plugin, session, caplog):
+    _down(session)
+    make_plugin().refresh_fixtures()
+    assert "Fixture lookup for 'mechelen' failed: GET /teams/slug/mechelen failed: ConnectionError: Connection aborted" in caplog.text
+    assert TEST_KEY not in caplog.text
+
+
+def test_live_check_network_error_is_retried_after_five_minutes(make_plugin, session, clock):
+    path = "/fixtures/date/2026-10-31"
+    _down(session, path)
+    plugin = make_plugin()
+    plugin.refresh_fixtures()
+    calls = session.paths().count(path)
+    clock.advance(299)
+    plugin.refresh_fixtures()
+    assert session.paths().count(path) == calls
+    clock.advance(1)
+    plugin.refresh_fixtures()
+    assert session.paths().count(path) == calls + 2  # still down: one GET plus its immediate retry
